@@ -1,7 +1,7 @@
 import { Context, Option, Schema } from "effect"
 import type { Effect } from "effect"
-import { ConversationId } from "../domain/message.entity.js"
-import type { AgentMessage, Checkpoint } from "../domain/message.entity.js"
+import { AgentMessage, ConversationId } from "../domain/message.entity.js"
+import type { Checkpoint } from "../domain/message.entity.js"
 
 export class StoreError extends Schema.TaggedError<StoreError>()("StoreError", {
   message: Schema.String,
@@ -14,6 +14,14 @@ export class ConversationSummary extends Schema.Class<ConversationSummary>(
   createdAt: Schema.Number,
   firstPrompt: Schema.optionalWith(Schema.String, { as: "Option" }),
   title: Schema.optionalWith(Schema.String, { as: "Option" }),
+}) {}
+
+/** A persisted row WITH its durable position — what the active window is
+ *  made of, so a loader never reconstructs positions by arithmetic (an
+ *  undecodable row in between would shift every later one). */
+export class StoredMessage extends Schema.Class<StoredMessage>("StoredMessage")({
+  position: Schema.Int,
+  message: AgentMessage,
 }) {}
 
 /**
@@ -35,12 +43,20 @@ export class ConversationStore extends Context.Tag("@xandreed/engine/Conversatio
       id: ConversationId,
       message: AgentMessage,
     ) => Effect.Effect<number, StoreError>
+    /** One turn's rows land TOGETHER or not at all — an assistant tool call
+     *  without its results is a row the next run cannot send. Returns the
+     *  positions, aligned with the input. */
+    readonly appendAll: (
+      id: ConversationId,
+      messages: ReadonlyArray<AgentMessage>,
+    ) => Effect.Effect<ReadonlyArray<number>, StoreError>
     readonly list: (
       id: ConversationId,
     ) => Effect.Effect<ReadonlyArray<AgentMessage>, StoreError>
+    /** The rows after the latest fold, each with its position. */
     readonly listActive: (
       id: ConversationId,
-    ) => Effect.Effect<ReadonlyArray<AgentMessage>, StoreError>
+    ) => Effect.Effect<ReadonlyArray<StoredMessage>, StoreError>
     readonly checkpoint: (
       id: ConversationId,
       summary: string,

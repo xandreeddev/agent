@@ -149,3 +149,34 @@ describe("makeSession", () => {
     )
   })
 })
+
+describe("makeSession — an interrupted turn leaves a trace", () => {
+  test("interrupt publishes onInterrupt ONLY when a turn was actually cut short", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const session = yield* makeSession<Ev, never>({
+          conversationId: cid,
+          runTurn: (text, publish) =>
+            text === "slow"
+              ? publish({ type: "note", text: "started" }).pipe(Effect.zipRight(Effect.never))
+              : publish({ type: "note", text }),
+          onError: (message) => ({ type: "error", message }),
+          onInterrupt: () => ({ type: "error", message: "interrupted" }),
+        })
+        // A finished turn: interrupt is a no-op, no phantom event.
+        yield* session.send("quick")
+        yield* session.interrupt
+        const fiber = yield* Effect.fork(session.send("slow"))
+        yield* Effect.sleep("20 millis")
+        yield* session.interrupt
+        yield* Fiber.join(fiber)
+        const { log } = yield* session.state
+        expect(log.map((e) => e.event)).toEqual([
+          { type: "note", text: "quick" },
+          { type: "note", text: "started" },
+          { type: "error", message: "interrupted" },
+        ])
+      }),
+    )
+  })
+})

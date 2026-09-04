@@ -4,7 +4,7 @@ import { Effect, FiberRef, Layer, Option, Ref, Schema, Stream } from "effect"
 import { Failure } from "../domain/failure.entity.js"
 import { Checkpoint, ConversationId } from "../domain/message.entity.js"
 import type { AgentMessage } from "../domain/message.entity.js"
-import { ConversationStore } from "../ports/conversation-store.port.js"
+import { ConversationStore, StoredMessage } from "../ports/conversation-store.port.js"
 import { CurrentPromptCacheKey } from "./cacheKey.js"
 import { runAgent } from "./runAgent.js"
 
@@ -14,19 +14,33 @@ const cid = ConversationId.make("00000000-0000-4000-8000-000000000002")
 const memoryStore = Effect.gen(function* () {
   const rows = yield* Ref.make<ReadonlyArray<AgentMessage>>([])
   const fold = yield* Ref.make(Option.none<Checkpoint>())
+  // Every write as the store saw it — `appendAll` batches are one entry.
+  const writes = yield* Ref.make<ReadonlyArray<ReadonlyArray<AgentMessage>>>([])
   return {
     layer: Layer.succeed(ConversationStore, {
       create: () => Effect.succeed(cid),
       append: (_id, message) =>
-        Ref.modify(rows, (all) => [all.length, [...all, message]] as const),
+        Ref.update(writes, (all) => [...all, [message]]).pipe(
+          Effect.zipRight(Ref.modify(rows, (all) => [all.length, [...all, message]] as const)),
+        ),
+      appendAll: (_id, messages) =>
+        Ref.update(writes, (all) => [...all, messages]).pipe(
+          Effect.zipRight(
+            Ref.modify(rows, (all) => [
+              messages.map((_, i) => all.length + i),
+              [...all, ...messages],
+            ] as const),
+          ),
+        ),
       list: () => Ref.get(rows),
       listActive: () =>
         Effect.gen(function* () {
           const checkpoint = yield* Ref.get(fold)
           const all = yield* Ref.get(rows)
+          const positioned = all.map((message, position) => new StoredMessage({ position, message }))
           return Option.match(checkpoint, {
-            onNone: () => all,
-            onSome: (c) => all.slice(c.messagePosition + 1),
+            onNone: () => positioned,
+            onSome: (c) => positioned.slice(c.messagePosition + 1),
           })
         }),
       checkpoint: (_id, summary) =>
@@ -58,6 +72,7 @@ const memoryStore = Effect.gen(function* () {
     prune: () => Effect.succeed(0),
     }),
     rows,
+    writes,
   }
 })
 
@@ -216,7 +231,7 @@ describe("runAgent", () => {
         const checkpoint = Option.getOrThrow(persisted.checkpoint)
         expect(checkpoint.summary).toBe("MID-RUN HANDOFF")
         expect(checkpoint.messagePosition).toBe(2)
-        expect(persisted.active.map((m) => m.role)).toEqual(["assistant", "tool", "assistant"])
+        expect(persisted.active.map((row) => row.message.role)).toEqual(["assistant", "tool", "assistant"])
         // Call 3 ran on summary + kept tail, not the original brief.
         expect(prompts[2]).toContain("MID-RUN HANDOFF")
         expect(prompts[2]).not.toContain("the big brief")
@@ -318,5 +333,133 @@ describe("runAgent", () => {
       }),
     )
     expect(seen).toEqual([String(cid)])
+  })
+})
+
+describe("runAgent — persistence that survives an interrupt", () => {
+  test("a tool turn's assistant call and its results land as ONE write; the prompt alone is its own", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* memoryStore
+        const calls = yield* Ref.make(0)
+        const toolThenText = LanguageModel.make({
+          generateText: () =>
+            Ref.getAndUpdate(calls, (n) => n + 1).pipe(
+              Effect.map(
+                (n) =>
+                  (n === 0
+                    ? [
+                        { type: "tool-call", id: "c0", name: "noop", params: { value: "x" } },
+                        {
+                          type: "finish",
+                          reason: "tool-calls",
+                          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                        },
+                      ]
+                    : [
+                        { type: "text", text: "done" },
+                        {
+                          type: "finish",
+                          reason: "stop",
+                          usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },
+                        },
+                      ]) as never,
+              ),
+            ),
+          streamText: () => Stream.die("not scripted") as never,
+        })
+        yield* runAgent({ system: "sys", toolkit: emptyKit }, cid, "go").pipe(
+          Effect.provide(emptyHandlers),
+          Effect.provideServiceEffect(LanguageModel.LanguageModel, toolThenText),
+          Effect.provide(store.layer),
+        )
+        const writes = yield* Ref.get(store.writes)
+        expect(writes.map((batch) => batch.map((m) => m.role))).toEqual([
+          ["user"],
+          ["assistant", "tool"],
+          ["assistant"],
+        ])
+      }),
+    )
+  })
+
+  test("the compaction mirror reads positions OFF the rows — a gap in the stored positions does not shift the checkpoint", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        // A store whose active window has a HOLE (an undecodable row at 2
+        // was skipped): real positions 0, 1, 3, then the prompt at 4; the old
+        // arithmetic (prompt − length + 1 + index) read them as 1, 2, 3, 4.
+        const rows = yield* Ref.make<ReadonlyArray<{ position: number; message: AgentMessage }>>([
+          { position: 0, message: { role: "user", content: "old question" } },
+          { position: 1, message: { role: "assistant", content: [{ type: "text", text: "old answer" }] } },
+          { position: 3, message: { role: "assistant", content: [{ type: "text", text: "old follow-up" }] } },
+        ])
+        const fold = yield* Ref.make(Option.none<Checkpoint>())
+        const layer = Layer.succeed(ConversationStore, {
+          create: () => Effect.succeed(cid),
+          append: (_id, message) =>
+            Ref.modify(rows, (all) => {
+              const position = (all[all.length - 1]?.position ?? -1) + 1
+              return [position, [...all, { position, message }]] as const
+            }),
+          appendAll: (_id, messages) =>
+            Ref.modify(rows, (all) => {
+              const base = (all[all.length - 1]?.position ?? -1) + 1
+              const added = messages.map((message, i) => ({ position: base + i, message }))
+              return [added.map((r) => r.position), [...all, ...added]] as const
+            }),
+          list: () => Effect.map(Ref.get(rows), (all) => all.map((r) => r.message)),
+          listActive: () =>
+            Effect.map(Ref.get(rows), (all) => all.map((r) => new StoredMessage(r))),
+          checkpoint: () => Effect.void,
+          checkpointAt: (_id, summary, messagePosition) =>
+            Ref.set(fold, Option.some(new Checkpoint({ conversationId: cid, messagePosition, summary, createdAt: 0 }))),
+          latestCheckpoint: () => Ref.get(fold),
+          setTitle: () => Effect.void,
+          listByWorkspace: () => Effect.succeed([]),
+          fork: () => Effect.succeed(cid),
+          prune: () => Effect.succeed(0),
+        })
+        const calls = yield* Ref.make(0)
+        const bigModel = LanguageModel.make({
+          generateText: () =>
+            Ref.getAndUpdate(calls, (n) => n + 1).pipe(
+              Effect.map(
+                (n) =>
+                  (n < 2
+                    ? [
+                        { type: "tool-call", id: `c${n}`, name: "noop", params: { value: "x" } },
+                        { type: "finish", reason: "tool-calls", usage: { inputTokens: 90_000, outputTokens: 5, totalTokens: 90_005 } },
+                      ]
+                    : [
+                        { type: "text", text: "done" },
+                        { type: "finish", reason: "stop", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 } },
+                      ]) as never,
+              ),
+            ),
+          streamText: () => Stream.die("not scripted") as never,
+        })
+        yield* runAgent(
+          {
+            system: "sys",
+            toolkit: emptyKit,
+            compaction: { thresholdTokens: 50_000, keepTurns: 2, summarize: () => Effect.succeed("FOLD") },
+          },
+          cid,
+          "the prompt",
+        ).pipe(
+          Effect.provide(emptyHandlers),
+          Effect.provideServiceEffect(LanguageModel.LanguageModel, bigModel),
+          Effect.provide(layer),
+        )
+        // Buffer after turn 0: old question(0) · old answer(1) · old
+        // follow-up(3) · prompt(4) · a(5) · t(6). keepTurns=2 keeps from
+        // "old follow-up" → the fold covers through "old answer" at position
+        // 1. Arithmetic would have written 2 — the hole — as the covered
+        // position, one row past the truth.
+        const checkpoint = Option.getOrThrow(yield* Ref.get(fold))
+        expect(checkpoint.messagePosition).toBe(1)
+      }),
+    )
   })
 })

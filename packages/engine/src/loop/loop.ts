@@ -167,7 +167,49 @@ const progressSignature = (
     .join("|")
 }
 
-type Phase = "continue" | "completed" | "step-cap" | "degenerate-loop"
+export type Phase = "continue" | "completed" | "step-cap" | "degenerate-loop"
+
+/**
+ * The degenerate-loop breaker's fold over one turn's progress signature —
+ * PURE, so the nudge-at-3 / break-at-5 policy is tested without a scripted
+ * model. An empty signature (no tool calls, or only pollable ones) leaves
+ * the count untouched: a turn that did nothing is not a turn that repeated.
+ */
+export const foldProgress = (
+  state: { readonly seen: ReadonlySet<string>; readonly staleTurns: number },
+  sig: string,
+): {
+  readonly stale: number
+  readonly seen: ReadonlySet<string>
+  readonly nudge: boolean
+  readonly broke: boolean
+} => {
+  const stale = sig === "" ? state.staleTurns : state.seen.has(sig) ? state.staleTurns + 1 : 0
+  const seen = sig === "" || state.seen.has(sig) ? state.seen : new Set([...state.seen, sig])
+  return {
+    stale,
+    seen,
+    nudge: sig !== "" && stale === REPEAT_NUDGE_AT,
+    broke: sig !== "" && stale >= REPEAT_BREAK_AT,
+  }
+}
+
+/** THE decision after a turn — the only model-driven edge is `wantsMore`
+ *  (the provider said "tool-calls" and there were some); the breaker and
+ *  the cap are the harness's, and they outrank it in that order. */
+export const nextPhase = (facts: {
+  readonly broke: boolean
+  readonly wantsMore: boolean
+  readonly turnIndex: number
+  readonly maxSteps: number
+}): Phase =>
+  facts.broke
+    ? "degenerate-loop"
+    : !facts.wantsMore
+      ? "completed"
+      : facts.turnIndex >= facts.maxSteps
+        ? "step-cap"
+        : "continue"
 
 interface LoopState {
   readonly messages: ReadonlyArray<AgentMessage>
@@ -324,13 +366,21 @@ export const runLoop = <Tools extends Record<string, Tool.Any>, R = never>(
               `Reply again using one of those tools, or plain text if you're done.`,
           }
           yield* options.onTail?.([corrective]) ?? Effect.void
+          // A corrective turn is a turn: the step cap counts it too, so a
+          // malformed streak can never carry a run past its ceiling.
+          const recoveredIndex = state.turnIndex + 1
+          const capped = recoveredIndex >= maxSteps
+          yield* capped
+            ? Effect.logWarning(`step cap reached while recovering from a malformed response`)
+            : Effect.void
           return {
             ...state,
             messages: [...state.messages, corrective],
             newTail: [...state.newTail, corrective],
-            turnIndex: state.turnIndex + 1,
+            turnIndex: recoveredIndex,
             malformedStreak: streak,
             corrections: state.corrections + 1,
+            phase: capped ? "step-cap" : state.phase,
           } satisfies LoopState
         }
 
@@ -398,12 +448,11 @@ export const runLoop = <Tools extends Record<string, Tool.Any>, R = never>(
         // A turn whose progress signature was already seen produced nothing
         // new; count consecutive stale turns, nudge once, then force-stop.
         const sig = progressSignature(content, pollable)
-        const stale = sig === "" ? state.staleTurns : state.seen.has(sig) ? state.staleTurns + 1 : 0
-        const seen = sig === "" || state.seen.has(sig) ? state.seen : new Set([...state.seen, sig])
-        const nudge: ReadonlyArray<AgentMessage> =
-          sig !== "" && stale === REPEAT_NUDGE_AT
-            ? [{ role: "user", content: DEGENERATE_REPEAT_NUDGE }]
-            : []
+        const progress = foldProgress(state, sig)
+        const { stale, seen } = progress
+        const nudge: ReadonlyArray<AgentMessage> = progress.nudge
+          ? [{ role: "user", content: DEGENERATE_REPEAT_NUDGE }]
+          : []
         yield* nudge.length > 0 ? (options.onTail?.(nudge) ?? Effect.void) : Effect.void
         yield* nudge.length > 0
           ? Metric.increment(tagged(engineCorrections, { "engine.kind": "degenerate-nudge" }))
@@ -412,14 +461,8 @@ export const runLoop = <Tools extends Record<string, Tool.Any>, R = never>(
         const finalText = text.length > 0 ? text : state.finalText
         const turnIndex = state.turnIndex + 1
         const wantsMore = outcome.finishReason === "tool-calls" && toolCalls.length > 0
-        const broke = sig !== "" && stale >= REPEAT_BREAK_AT
-        const phase: Phase = broke
-          ? "degenerate-loop"
-          : !wantsMore
-            ? "completed"
-            : turnIndex >= maxSteps
-              ? "step-cap"
-              : "continue"
+        const broke = progress.broke
+        const phase = nextPhase({ broke, wantsMore, turnIndex, maxSteps })
         yield* broke
           ? Effect.logWarning(`breaking a degenerate tool-call loop after ${stale} stale turns`)
           : Effect.void

@@ -156,7 +156,7 @@ export const foldConversation = (options: {
   Effect.gen(function* () {
     const store = yield* ConversationStore
     const utility = yield* UtilityLlm
-    const active = yield* store.listActive(options.conversationId)
+    const active = (yield* store.listActive(options.conversationId)).map((row) => row.message)
     if (active.length === 0) return
     const previous = yield* store
       .latestCheckpoint(options.conversationId)

@@ -1,4 +1,4 @@
-import { Effect, Fiber, Option, PubSub, Ref, Stream } from "effect"
+import { Effect, Exit, Fiber, Option, PubSub, Ref, Stream } from "effect"
 import type { ConversationId } from "../domain/message.entity.js"
 
 /**
@@ -57,6 +57,9 @@ export const makeSession = <E, RS = never>(args: {
   ) => Effect.Effect<void, unknown, RS>
   /** Map a turn failure into the product's error event. */
   readonly onError: (message: string) => E
+  /** The event an INTERRUPTED turn leaves on the ledger — without one the
+   *  ledger simply stops mid-turn and every driver has to say so by hand. */
+  readonly onInterrupt?: () => E
   /** Route matching events to the lossy `transient` channel INSTEAD of the
    *  ledger — a delta flood must never grow the replay log. */
   readonly isTransient?: (event: E) => boolean
@@ -94,16 +97,28 @@ export const makeSession = <E, RS = never>(args: {
         Effect.gen(function* () {
           const fiber = yield* Effect.fork(runContained(text))
           yield* Ref.set(running, Option.some(fiber))
-          yield* Fiber.join(fiber).pipe(Effect.ignore)
+          // AWAIT, never join: joining an interrupted turn would interrupt
+          // the sender too — an interrupted turn ends the send normally,
+          // its trace already on the ledger.
+          yield* Fiber.await(fiber).pipe(Effect.asVoid)
           yield* Ref.set(running, Option.none())
         }),
       )
 
+    // Interrupting a turn that already finished on its own is a no-op AND
+    // leaves no event — only a real interruption goes on the ledger.
     const interrupt = Ref.get(running).pipe(
       Effect.flatMap(
         Option.match({
           onNone: () => Effect.void,
-          onSome: (fiber) => Fiber.interrupt(fiber).pipe(Effect.asVoid),
+          onSome: (fiber) =>
+            Fiber.interrupt(fiber).pipe(
+              Effect.flatMap((exit) =>
+                Exit.isInterrupted(exit) && args.onInterrupt !== undefined
+                  ? publish(args.onInterrupt())
+                  : Effect.void,
+              ),
+            ),
         }),
       ),
     )

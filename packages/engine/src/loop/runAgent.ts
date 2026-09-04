@@ -86,28 +86,32 @@ export const runAgent = <Tools extends Record<string, Tool.Any>, R = never>(
 ) =>
   Effect.gen(function* () {
     const store = yield* ConversationStore
-    const promptPosition = yield* store
-      .append(conversationId, { role: "user", content: prompt })
-      .pipe(Effect.orDie)
+    yield* store.append(conversationId, { role: "user", content: prompt }).pipe(Effect.orDie)
     const fold = yield* store.latestCheckpoint(conversationId).pipe(Effect.orDie)
+    // The active window comes back WITH its positions — the mirror below is
+    // read off the rows, never reconstructed by arithmetic (a row the store
+    // skipped as undecodable used to shift every checkpoint after it).
     const active = yield* store.listActive(conversationId).pipe(Effect.orDie)
     const messages = Option.match(fold, {
-      onNone: () => active,
-      onSome: (checkpoint) => [handoffToMessage(checkpoint.summary), ...active],
+      onNone: () => active.map((row) => row.message),
+      onSome: (checkpoint) => [
+        handoffToMessage(checkpoint.summary),
+        ...active.map((row) => row.message),
+      ],
     })
 
-    // Active rows are the contiguous positions ending at the prompt's — the
-    // mirror starts aligned with `messages` (None = the synthetic handoff).
-    const activePositions = active.map((_, index) =>
-      Option.some(promptPosition - active.length + 1 + index),
-    )
+    // The mirror starts aligned with `messages` (None = the synthetic handoff).
+    const activePositions = active.map((row) => Option.some(row.position))
     const mirrorRef = yield* Ref.make<ReadonlyArray<Option.Option<number>>>(
       Option.isSome(fold) ? [Option.none<number>(), ...activePositions] : activePositions,
     )
     const cooldownRef = yield* Ref.make(0)
 
+    // One turn's tail lands as ONE write: an interrupt between an assistant
+    // tool call and its results used to leave a row the next run sent to the
+    // provider — which rejected it.
     const onTail = (tail: ReadonlyArray<AgentMessage>) =>
-      Effect.forEach(tail, (message) => store.append(conversationId, message)).pipe(
+      store.appendAll(conversationId, tail).pipe(
         Effect.tap((positions) =>
           Ref.update(mirrorRef, (all) => [...all, ...positions.map(Option.some)]),
         ),
