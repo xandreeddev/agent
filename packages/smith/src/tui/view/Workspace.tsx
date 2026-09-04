@@ -5,11 +5,12 @@ import { Logo } from "./ui/Logo.js"
 import type { SmithTuiContext } from "../state/store.js"
 
 /**
- * The idle dashboard — a persistent session's home. Identity first (the
- * lockup), then WHAT'S CONFIGURED (the provider strip — the old line's
- * at-a-glance statuses, re-homed), then the workspace: specs, forge runs,
- * previous sessions (`:resume`), lessons. An UNCONFIGURED workspace shows
- * the onboarding checklist instead — the guided first-run.
+ * The idle dashboard — a persistent session's home, and a MENU: identity
+ * first (the lockup), then WHAT'S CONFIGURED (the provider strip), then the
+ * workspace: specs, forge runs, previous sessions, lessons — every row
+ * focusable (Tab) and actionable (⏎), or reachable through `:open`. An
+ * UNCONFIGURED workspace shows the onboarding checklist instead — the
+ * guided first-run.
  */
 
 const SectionHead = (props: { accent: string; label: string }) => (
@@ -17,6 +18,13 @@ const SectionHead = (props: { accent: string; label: string }) => (
     <text fg={props.accent} flexShrink={0}>{`${glyph.brand} `}</text>
     <text fg={tokens.text.dim} wrapMode="none">{props.label}</text>
   </box>
+)
+
+/** The row's leading two cells: the dashboard cursor, or the indent. */
+const Cursor = (props: { on: boolean }) => (
+  <text fg={tokens.marker.select} flexShrink={0}>
+    {props.on ? `${glyph.pointer} ` : "  "}
+  </text>
 )
 
 const ProviderStrip = (props: { ctx: SmithTuiContext }) => {
@@ -80,6 +88,14 @@ const Onboarding = (props: { ctx: SmithTuiContext }) => {
 
 export const Workspace = (props: { ctx: SmithTuiContext }) => {
   const view = props.ctx.store.workspace
+  const focus = props.ctx.store.dashboardFocus
+  // The flat row order the cursor walks: specs · runs · sessions · lessons
+  // (see presentation/dashboard.ts — the same order, the same rows).
+  const runBase = () => view().specs.length
+  const sessionBase = () => runBase() + view().runs.length
+  const lessonBase = () => sessionBase() + view().sessions.length
+  const total = () => lessonBase() + view().lessons.length
+  const focusedAt = (index: number) => Option.exists(focus(), (at) => at === index)
   return (
     <Show when={!view().unconfigured} fallback={<Onboarding ctx={props.ctx} />}>
       <box flexDirection="column" flexGrow={1}>
@@ -87,6 +103,13 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
           <Logo compact />
         </box>
         <ProviderStrip ctx={props.ctx} />
+        <Show when={total() > 0}>
+          <text fg={tokens.text.dim} wrapMode="none">
+            {Option.isSome(focus())
+              ? "↑/↓ move · ⏎ act on the row · esc back to the composer"
+              : "Tab focuses a row · ⏎ acts on it · :open lists everything"}
+          </text>
+        </Show>
         <box flexDirection="row" flexGrow={1}>
           <box flexDirection="column" flexGrow={1}>
             <SectionHead accent={BRAND.verdigris} label="specs" />
@@ -99,15 +122,21 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
               }
             >
               <For each={view().specs}>
-                {(spec) => (
+                {(spec, index) => (
                   <box flexDirection="row">
+                    <Cursor on={focusedAt(index())} />
                     <text
                       fg={spec.status === "locked" ? tokens.state.ok : tokens.state.warn}
                       flexShrink={0}
                     >
-                      {`  ${spec.status === "locked" ? glyph.pass : glyph.pending} ${spec.slug} `}
+                      {`${spec.status === "locked" ? glyph.pass : glyph.pending} ${spec.slug} `}
                     </text>
-                    <text fg={tokens.text.dim} wrapMode="none">{spec.goal}</text>
+                    <text
+                      fg={focusedAt(index()) ? tokens.text.bright : tokens.text.dim}
+                      wrapMode="none"
+                    >
+                      {spec.goal}
+                    </text>
                   </box>
                 )}
               </For>
@@ -119,25 +148,45 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
               fallback={<text fg={tokens.state.pending}>{"  (none yet)"}</text>}
             >
               <For each={view().runs}>
-                {(run) => (
-                  <text
-                    fg={run.accepted ? tokens.state.ok : tokens.state.error}
-                    wrapMode="none"
-                  >{`  ${run.text}`}</text>
+                {(run, index) => (
+                  <box flexDirection="row">
+                    <Cursor on={focusedAt(runBase() + index())} />
+                    <text
+                      fg={
+                        focusedAt(runBase() + index())
+                          ? tokens.text.bright
+                          : run.accepted
+                            ? tokens.state.ok
+                            : tokens.state.error
+                      }
+                      wrapMode="none"
+                    >
+                      {run.text}
+                    </text>
+                  </box>
                 )}
               </For>
             </Show>
 
-            <SectionHead accent={BRAND.chartreuse} label="sessions (:resume)" />
+            <SectionHead accent={BRAND.chartreuse} label="sessions" />
             <Show
               when={view().sessions.length > 0}
               fallback={<text fg={tokens.state.pending}>{"  (none yet)"}</text>}
             >
               <For each={view().sessions}>
-                {(session) => (
+                {(session, index) => (
                   <box flexDirection="row">
-                    <text fg={tokens.text.default} wrapMode="none" flexShrink={1}>
-                      {`  ${glyph.bullet} ${session.label}`}
+                    <Cursor on={focusedAt(sessionBase() + index())} />
+                    <text
+                      fg={
+                        focusedAt(sessionBase() + index())
+                          ? tokens.text.bright
+                          : tokens.text.default
+                      }
+                      wrapMode="none"
+                      flexShrink={1}
+                    >
+                      {`${glyph.bullet} ${session.label}`}
                     </text>
                     <text fg={tokens.text.dim} wrapMode="none" flexShrink={0}>
                       {session.ageMinutes < 60
@@ -161,8 +210,18 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
               }
             >
               <For each={view().lessons}>
-                {(lesson) => (
-                  <text fg={tokens.text.muted} wrapMode="word">{`  ${glyph.bullet} ${lesson}`}</text>
+                {(lesson, index) => (
+                  <box flexDirection="row">
+                    <Cursor on={focusedAt(lessonBase() + index())} />
+                    <text
+                      fg={
+                        focusedAt(lessonBase() + index()) ? tokens.text.bright : tokens.text.muted
+                      }
+                      wrapMode="word"
+                    >
+                      {`${glyph.bullet} ${lesson}`}
+                    </text>
+                  </box>
                 )}
               </For>
             </Show>

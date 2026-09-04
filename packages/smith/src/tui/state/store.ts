@@ -27,6 +27,7 @@ import type { WorkspaceView } from "../presentation/workspace.js"
 import { emptyWorkspace } from "../presentation/workspace.js"
 import type { LoginFlow } from "../presentation/loginFlow.js"
 import type { SelectState } from "../presentation/selectBox.js"
+import type { DashboardRow } from "../presentation/dashboard.js"
 
 export interface RolesReadout {
   readonly general: string
@@ -49,6 +50,12 @@ export type SelectPurpose =
   | { readonly tag: "fallback-model" }
   /** A numeric preset picker for one keyed setting. */
   | { readonly tag: "setting-number"; readonly key: "maxAttempts" | "budgetMillis" }
+  /** `:open` — every dashboard row; Enter opens that row's actions. */
+  | { readonly tag: "dashboard" }
+  /** One dashboard row's verbs (open / lock / forge / delete / report / …). */
+  | { readonly tag: "row-actions"; readonly row: DashboardRow }
+  /** The one destructive verb asks first. */
+  | { readonly tag: "confirm-delete-spec"; readonly slug: string }
 
 /** ONE inline contextual surface at a time — select picker or the login
  *  flow; while open, the composer unmounts and keys route here. */
@@ -167,6 +174,11 @@ export interface SmithStore {
   /** The workspace dashboard (idle mode): specs · runs · lessons. */
   readonly workspace: Accessor<WorkspaceView>
   readonly setWorkspace: (view: WorkspaceView) => void
+  /** The dashboard cursor — `Some(index)` over `dashboardRows(workspace)`
+   *  while the dashboard (not the composer) owns ↑/↓/⏎; cleared on every
+   *  mode change. */
+  readonly dashboardFocus: Accessor<Option.Option<number>>
+  readonly setDashboardFocus: (focus: Option.Option<number>) => void
   /** Fresh floor for the NEXT forge run (a persistent session runs many). */
   readonly resetFloor: (task: string, maxAttempts: number) => void
   /** Fresh refine state for the NEXT idea. */
@@ -174,8 +186,26 @@ export interface SmithStore {
   readonly resetProfile: () => void
 }
 
+/** What the dashboard's action menus can do — implemented by the workspace
+ *  session; absent in the single-purpose TUI modes. */
+export interface DashboardActions {
+  /** Open a spec on file into refine mode (a draft to keep refining; a
+   *  locked one to review and :forge). */
+  readonly openSpec: (slug: string) => void
+  /** Lock a draft as-is — the human's approval without a refine turn. */
+  readonly lockSpec: (slug: string) => void
+  /** Remove the spec file (asked first). */
+  readonly deleteSpec: (slug: string) => void
+  /** Replay a persisted run's attempts + verdicts into the floor. */
+  readonly showRun: (id: string) => void
+  /** Replay the run AND arm follow-up on its coder conversation. */
+  readonly followUpRun: (id: string) => void
+}
+
 export interface SmithTuiContext {
   readonly store: SmithStore
+  /** The dashboard's verbs (workspace session only). */
+  readonly dashboard?: DashboardActions
   readonly runConfig: SmithRunConfig
   /** UI→Effect bridge (the captured Runtime); actions reach settings/auth/fs/shell. */
   readonly run: <A, E>(effect: Effect.Effect<A, E, SmithUiServices>) => Promise<A>
@@ -241,6 +271,7 @@ export const createSmithStore = (
   const composerCursorSet = { current: (_at: number): void => {} }
   const composerSubmit = { current: () => {} }
   const [composerLive, setComposerLive] = createSignal("")
+  const [dashboardFocus, setDashboardFocus] = createSignal<Option.Option<number>>(Option.none())
   const apply = (event: SmithEvent): void => {
     setLastEventAt(Date.now())
     // The COST fold: every finished turn's usage priced at its model (the
@@ -276,7 +307,11 @@ export const createSmithStore = (
     reduce: (event) => batch(() => apply(event)),
     reduceBatch: (events) => batch(() => events.forEach(apply)),
     mode: modeSig,
-    setMode: (next) => setModeSig(next),
+    setMode: (next) => {
+      // The dashboard cursor belongs to the idle screen only.
+      if (next !== "idle") setDashboardFocus(Option.none())
+      setModeSig(next)
+    },
     refine,
     profile,
     conversation,
@@ -366,6 +401,8 @@ export const createSmithStore = (
     },
     workspace,
     setWorkspace: (view) => setWorkspaceSig(view),
+    dashboardFocus,
+    setDashboardFocus,
     resetFloor: (task, maxAttempts) => setFloor(initialFloor(task, maxAttempts)),
     resetRefine: () => setRefine(initialRefine),
     resetProfile: () => setProfile(initialProfile),

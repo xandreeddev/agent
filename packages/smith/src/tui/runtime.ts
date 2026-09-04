@@ -2,20 +2,21 @@ import { createCliRenderer } from "@opentui/core"
 import { render } from "@opentui/solid"
 import { createComponent } from "solid-js"
 import { Deferred, Effect, Fiber, Option, Queue, Ref, Runtime, Schema, Scope } from "effect"
-import { SettingsStore } from "@xandreed/engine"
+import { FileSystem, SettingsStore } from "@xandreed/engine"
 import type { AuthStore, ModelCatalog } from "@xandreed/engine"
-import type { FileSystem, SpecDoc } from "@xandreed/engine"
+import type { SpecDoc } from "@xandreed/engine"
 import type { SmithEvent } from "../domain/SmithEvent.js"
 import type { SmithRunConfig } from "../domain/SmithConfig.js"
 import type { ImplementorServices } from "../implementor/efferentImplementor.js"
 import { loadForgeLessons, runForgeSession } from "../forge/session.js"
 import { renderShipPlan, runShip } from "../forge/ship.js"
 import { followUpTarget, runFollowUpTurn } from "../forge/followUp.js"
+import { eventsFromRun } from "../forge/replayRun.js"
 import type { ShipPlan } from "../forge/ship.js"
 import { makeRefineSession } from "../refine/session.js"
 import type { RefineAgent, RefineSession } from "../refine/session.js"
 import { makeProfileSession } from "../profile/session.js"
-import { listSpecs, loadSpecDoc } from "../spec/store.js"
+import { listSpecs, loadSpecDoc, lockSpecDoc, specPath } from "../spec/store.js"
 import { workspaceView } from "./presentation/workspace.js"
 import type { ProviderStatus, SmithProvider } from "./presentation/loginFlow.js"
 import { AuthStore as AuthStoreTag, ConversationId, ConversationStore, UtilityLlm, assistantModel, assistantUsage } from "@xandreed/engine"
@@ -410,6 +411,17 @@ export const makeWorkspaceBody = (
       // continues it (free-form: "test the edges", "run the evals").
       const followUpRef = yield* Ref.make(Option.none<ConversationId>())
 
+      /** Stop a running refine/follow-up turn (idempotent) — anything that
+       *  REPLACES the story must not race a turn still writing into it. */
+      const stopTurn = Effect.gen(function* () {
+        const running = yield* Ref.get(turnFiberRef)
+        yield* Option.match(running, {
+          onNone: () => Effect.void,
+          onSome: (fiber) => Fiber.interrupt(fiber).pipe(Effect.asVoid),
+        })
+        yield* Ref.set(turnFiberRef, Option.none())
+      })
+
       // The dashboard reads: specs (undecodable ones dropped — one hand-edited
       // file can't blank the view), the forge-run history, the lessons brief.
       const SMITH_PROVIDERS: ReadonlyArray<SmithProvider> = [
@@ -491,12 +503,7 @@ export const makeWorkspaceBody = (
             // about to replace — stop it first; and the finished run's
             // follow-up target belongs to the OLD session, so the next text
             // must not land in that coder's conversation.
-            const running = yield* Ref.get(turnFiberRef)
-            yield* Option.match(running, {
-              onNone: () => Effect.void,
-              onSome: (fiber) => Fiber.interrupt(fiber).pipe(Effect.asVoid),
-            })
-            yield* Ref.set(turnFiberRef, Option.none())
+            yield* stopTurn
             yield* Ref.set(followUpRef, Option.none())
             const session = yield* makeRefineSession(run.cwd, publish, {
               unattended: false,
@@ -639,13 +646,156 @@ export const makeWorkspaceBody = (
       const dropRefine = Effect.gen(function* () {
         yield* Ref.set(refineRef, Option.none())
         yield* Ref.set(followUpRef, Option.none())
+        // Re-read the workspace BEFORE the dashboard shows — switching first
+        // flashed the previous dashboard (the run just finished missing from
+        // its own list) for a frame or, on a slow box, several.
+        yield* refreshWorkspace
         yield* Effect.sync(() => {
           store.resetRefine()
           store.resetConversation()
+          // The finished run's status rows (outcome · artifact · session)
+          // belong to THAT run — left standing under a fresh idea they read
+          // as the next run's state (live-caught on the dashboard).
+          store.resetFloor("", run.maxAttempts)
+          store.setNotice("")
           store.setMode("idle")
         })
-        yield* refreshWorkspace
       })
+
+      const artifactPath = (id: string): string => join(run.cwd, ".foundry", "runs", `${id}.json`)
+
+      /** Replay a persisted run into the floor + the story (replay ≡
+       *  live-fold); optionally arm follow-up on its coder conversation and
+       *  `:ship` when it was accepted — the dashboard's "report"/"follow up". */
+      const replayRun = (id: string, armFollowUp: boolean) =>
+        Effect.gen(function* () {
+          const runs = yield* readRuns(join(run.cwd, ".foundry", "runs"))
+          const found = Option.fromNullable(runs.find((r) => String(r.id) === id))
+          if (Option.isNone(found)) {
+            yield* Effect.sync(() => store.setNotice(`no run ${id.slice(0, 8)} on file`))
+            return
+          }
+          const record = found.value
+          const forging = yield* Ref.get(forgeFiberRef)
+          if (Option.isSome(forging) && forging.value.unsafePoll() === null) {
+            yield* Effect.sync(() => store.setNotice("a forge is running — wait for it, or Esc first"))
+            return
+          }
+          yield* stopTurn
+          yield* Effect.sync(() => {
+            store.resetFloor(record.spec.goal, record.spec.limits.maxAttempts)
+            store.resetConversation()
+            store.setMode("forge")
+          })
+          yield* Effect.forEach(eventsFromRun(record, artifactPath(id)), publish)
+          const target = armFollowUp
+            ? followUpTarget(record.attempts.map((attempt) => attempt.implementorRef)).pipe(
+                Option.flatMap((cid) => Schema.decodeUnknownOption(ConversationId)(cid)),
+              )
+            : Option.none<ConversationId>()
+          yield* Ref.set(followUpRef, target)
+          yield* Ref.set(
+            shipPlanRef,
+            armFollowUp && record.outcome._tag === "accepted"
+              ? Option.some(renderShipPlan(run.cwd, Option.none(), record))
+              : Option.none(),
+          )
+          yield* Effect.sync(() =>
+            store.setNotice(
+              !armFollowUp
+                ? "run replayed — :new for the next idea"
+                : Option.isSome(target)
+                  ? "run replayed — follow up freely (the coder keeps its context) · :new for the next idea"
+                  : "run replayed — no coder conversation on file to follow up",
+            ),
+          )
+        })
+
+      /** A spec on file, or a notice and None. */
+      const specOnFile = (slug: string) =>
+        loadSpecDoc(run.cwd, slug).pipe(
+          Effect.map(Option.some),
+          Effect.catchAll((error) =>
+            Effect.sync(() => store.setNotice(error.message)).pipe(Effect.as(Option.none<SpecDoc>())),
+          ),
+        )
+
+      const openSpec = (slug: string) =>
+        Effect.gen(function* () {
+          const doc = yield* specOnFile(slug)
+          if (Option.isNone(doc)) return
+          yield* stopTurn
+          yield* Ref.set(followUpRef, Option.none())
+          const session = yield* makeRefineSession(run.cwd, publish, {
+            unattended: false,
+            slug: doc.value.slug,
+            pendingInput: steerFromQueue(store),
+            ...(seams.refineAgent !== undefined ? { agent: seams.refineAgent } : {}),
+          })
+          yield* Ref.set(refineRef, Option.some(session))
+          yield* Effect.sync(() => {
+            store.resetRefine()
+            store.resetConversation()
+            store.setMode("refine")
+          })
+          const path = specPath(run.cwd, slug)
+          yield* publish(
+            doc.value.status === "locked"
+              ? { type: "spec_locked", doc: doc.value, path }
+              : { type: "spec_draft", doc: doc.value, path },
+          )
+          yield* Effect.sync(() =>
+            store.setNotice(
+              doc.value.status === "locked"
+                ? `opened ${slug} (locked) — :forge to build`
+                : `opened ${slug} — refine in the composer, :lock when it's right`,
+            ),
+          )
+        })
+
+      const lockSpec = (slug: string) =>
+        Effect.gen(function* () {
+          const doc = yield* specOnFile(slug)
+          if (Option.isNone(doc)) return
+          if (doc.value.status === "locked") {
+            yield* Effect.sync(() => store.setNotice(`${slug} is already locked — :forge ${slug}`))
+            return
+          }
+          const at = yield* Effect.sync(() => new Date().toISOString())
+          const locked = yield* lockSpecDoc(run.cwd, doc.value, at).pipe(
+            Effect.map(Option.some),
+            Effect.catchAll((error) =>
+              Effect.sync(() => store.setNotice(error.message)).pipe(Effect.as(Option.none<SpecDoc>())),
+            ),
+          )
+          if (Option.isNone(locked)) return
+          yield* refreshWorkspace
+          // A refine session open on this very spec sees the lock too.
+          yield* store.mode() === "refine"
+            ? publish({ type: "spec_locked", doc: locked.value, path: specPath(run.cwd, slug) })
+            : Effect.void
+          yield* Effect.sync(() => store.setNotice(`locked ${slug} — :forge ${slug} to build`))
+        })
+
+      const deleteSpec = (slug: string) =>
+        Effect.gen(function* () {
+          const fs = yield* FileSystem
+          // A refine session open on this spec loses its draft — drop it first.
+          const current = yield* Effect.flatMap(
+            Ref.get(refineRef),
+            Option.match({
+              onNone: () => Effect.succeed(Option.none<string>()),
+              onSome: (session) =>
+                Effect.map(session.currentDraft, Option.map((draft) => String(draft.doc.slug))),
+            }),
+          )
+          yield* Option.exists(current, (open) => open === slug) ? dropRefine : Effect.void
+          yield* fs
+            .remove(specPath(run.cwd, slug))
+            .pipe(Effect.catchAll((error) => Effect.sync(() => store.setNotice(error.message))))
+          yield* refreshWorkspace
+          yield* Effect.sync(() => store.setNotice(`deleted ${slug}`))
+        })
 
       const sendText = (text: string): void => {
         forked(
@@ -924,6 +1074,23 @@ export const makeWorkspaceBody = (
         forge: (slug?: string) => startForge(Option.fromNullable(slug)),
         newSpec: () => {
           Runtime.runFork(rt)(dropRefine)
+        },
+        dashboard: {
+          openSpec: (slug) => {
+            forked("open", openSpec(slug))
+          },
+          lockSpec: (slug) => {
+            forked("lock", lockSpec(slug))
+          },
+          deleteSpec: (slug) => {
+            forked("delete", deleteSpec(slug))
+          },
+          showRun: (id) => {
+            forked("report", replayRun(id, false))
+          },
+          followUpRun: (id) => {
+            forked("follow-up", replayRun(id, true))
+          },
         },
         resume: resumeSession,
         branch: () => {

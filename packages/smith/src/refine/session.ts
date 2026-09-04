@@ -1,10 +1,10 @@
 import type { LanguageModel } from "@effect/ai"
 import { Effect, Option, Ref } from "effect"
 import { ConfigError } from "@xandreed/foundry"
-import { ConversationStore, runAgent, SpecSlug } from "@xandreed/engine"
+import { ConversationStore, FileSystem, runAgent, SpecSlug } from "@xandreed/engine"
 import { loadForgeLessons, loadWorkspaceRules } from "../forge/session.js"
 import { loadQualityBar } from "../gates/profile.js"
-import type { AgentMessage, ConversationId, FileSystem, Shell, SpecDoc } from "@xandreed/engine"
+import type { AgentMessage, ConversationId, Shell, SpecDoc } from "@xandreed/engine"
 import { expandFileRefs } from "./fileRefs.js"
 import {
   makeSpecRefinerHandlers,
@@ -13,7 +13,7 @@ import {
 } from "./refiner.js"
 import type { SmithEvent } from "../domain/SmithEvent.js"
 import { discoverSkills, renderSkillsBlock } from "../skills/skills.js"
-import { loadSpecDoc, lockSpecDoc } from "../spec/store.js"
+import { loadSpecDoc, lockSpecDoc, specPath } from "../spec/store.js"
 
 /** What a refine session needs from the environment — the coder's
  *  `ImplementorServices` minus the fast tier (only the implementor's
@@ -123,7 +123,22 @@ export const makeRefineSession = (
           Effect.orElseSucceed(() => Option.none<{ slug: SpecSlug; path: string }>()),
         ),
     })
-    const draftRef = yield* Ref.make(recovered)
+    // An OPENED spec (`slug` without `resume`) is the draft from the first
+    // turn — `:lock` and `:forge` work before any re-propose. Only when the
+    // file is really there: `smith spec` mints slugs ahead of the first draft.
+    const opened = yield* Option.match(Option.fromNullable(options.slug), {
+      onNone: () => Effect.succeed(Option.none<{ slug: SpecSlug; path: string }>()),
+      onSome: (slug) =>
+        Effect.flatMap(FileSystem, (fs) =>
+          fs.exists(specPath(cwd, String(slug))).pipe(
+            Effect.orElseSucceed(() => false),
+            Effect.map((exists) =>
+              exists ? Option.some({ slug, path: specPath(cwd, String(slug)) }) : Option.none(),
+            ),
+          ),
+        ),
+    })
+    const draftRef = yield* Ref.make(Option.orElse(recovered, () => opened))
 
     // ONE handler record for the whole session — the layer (real agent) and
     // the scripted seam share the same slug identity + draft tracking. A

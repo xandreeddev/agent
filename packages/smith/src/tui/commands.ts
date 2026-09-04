@@ -5,6 +5,7 @@ import { openSelect } from "./presentation/selectBox.js"
 import { logout, openLoginFlow } from "./actions/login.js"
 import { openModelPicker, submitModel } from "./actions/model.js"
 import { openSettingsMenu } from "./actions/settings.js"
+import { openDashboardMenu } from "./actions/dashboard.js"
 import type { SmithTuiContext } from "./state/store.js"
 
 /**
@@ -25,6 +26,9 @@ export const runTuiCommand = (ctx: SmithTuiContext, raw: string): void => {
   Match.value(command).pipe(
     Match.whenOr("quit", "q", () => {
       ctx.exit(quitCode(ctx.store.exitCode()))
+    }),
+    Match.when("open", () => {
+      openDashboardMenu(ctx)
     }),
     Match.when("new", () => {
       if (ctx.newSpec === undefined) {
@@ -128,7 +132,7 @@ export const runTuiCommand = (ctx: SmithTuiContext, raw: string): void => {
     }),
     Match.orElse(() => {
       ctx.store.setNotice(
-        `unknown command: :${typed} (:quit · :new · :lock · :forge [slug] · :ship · :model [code|fast] · :settings · :resume · :login · :logout)`,
+        `unknown command: :${typed} (:quit · :new · :open · :lock · :forge [slug] · :ship · :model [code|fast] · :settings · :resume · :login · :logout)`,
       )
     }),
   )

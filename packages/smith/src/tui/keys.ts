@@ -30,6 +30,14 @@ import {
   toggleViMode,
 } from "./actions/settings.js"
 import { logout } from "./actions/login.js"
+import {
+  focusedRow,
+  openRowActions,
+  submitDashboardPick,
+  submitDeleteConfirm,
+  submitRowAction,
+} from "./actions/dashboard.js"
+import { dashboardRows, moveFocus } from "./presentation/dashboard.js"
 import type { Overlay, SmithTuiContext } from "./state/store.js"
 
 /** The structural slice of OpenTUI's ParsedKey smith cares about. */
@@ -151,6 +159,18 @@ const routeSelectKey = (ctx: SmithTuiContext, overlay: Overlay & { kind: "select
             )
             return
           }
+          if (overlay.purpose.tag === "dashboard") {
+            submitDashboardPick(ctx, value)
+            return
+          }
+          if (overlay.purpose.tag === "row-actions") {
+            submitRowAction(ctx, overlay.purpose.row, value)
+            return
+          }
+          if (overlay.purpose.tag === "confirm-delete-spec") {
+            submitDeleteConfirm(ctx, overlay.purpose.slug, value)
+            return
+          }
           // logout picker: the value IS the provider id.
           ctx.store.closeOverlay()
           logout(ctx, value)
@@ -230,6 +250,45 @@ export const dispatch = (ctx: SmithTuiContext, key: Key): void => {
   if (overlay.kind === "login") {
     routeLoginKey(ctx, overlay, key)
     return
+  }
+  // --- the dashboard as a menu (the idle screen) ---
+  // Tab on an EMPTY composer hands ↑/↓/⏎ to the dashboard rows; Esc, Tab
+  // again, or typing hands them back. It never engages with text in the
+  // composer — there, Tab still completes a `:` command.
+  if (ctx.store.mode() === "idle" && key.ctrl !== true) {
+    const focus = ctx.store.dashboardFocus()
+    const rows = dashboardRows(ctx.store.workspace())
+    if (key.name === "tab" && ctx.store.composerText().length === 0) {
+      key.preventDefault?.()
+      if (rows.length === 0) {
+        ctx.store.setNotice("nothing to open yet — describe what to build")
+        return
+      }
+      ctx.store.setDashboardFocus(Option.isSome(focus) ? Option.none() : Option.some(0))
+      return
+    }
+    if (Option.isSome(focus)) {
+      if (key.name === "up" || key.name === "down") {
+        key.preventDefault?.()
+        ctx.store.setDashboardFocus(moveFocus(rows.length, focus, key.name))
+        return
+      }
+      if (key.name === "return") {
+        key.preventDefault?.()
+        Option.match(focusedRow(ctx), {
+          onNone: () => ctx.store.setDashboardFocus(Option.none()),
+          onSome: (row) => openRowActions(ctx, row),
+        })
+        return
+      }
+      if (key.name === "escape") {
+        key.preventDefault?.()
+        ctx.store.setDashboardFocus(Option.none())
+        return
+      }
+      // Any other key is the composer's — the cursor steps aside.
+      ctx.store.setDashboardFocus(Option.none())
+    }
   }
   // --- vi mode (enabled via :settings / config "viMode") ---
   // Insert = the composer exactly as without vi. Esc enters NORMAL with the

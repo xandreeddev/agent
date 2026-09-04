@@ -17,6 +17,8 @@ export interface SpecLine {
 }
 
 export interface RunLine {
+  /** The run id — what the dashboard menu opens (report / follow-up). */
+  readonly id: string
   readonly text: string
   readonly accepted: boolean
 }
@@ -72,6 +74,7 @@ export const runLine = (run: FactoryRun): RunLine => {
         : `◌ in flight — ${run.attempts.length} attempt(s) recorded`
   const rejects = gatesFailed > 0 ? ` · ${gatesFailed} gate reject(s)` : ""
   return {
+    id: String(run.id),
     text: `${outcome} · ${clip(run.spec.goal, 48)}${rejects}`,
     accepted: run.outcome._tag === "accepted",
   }

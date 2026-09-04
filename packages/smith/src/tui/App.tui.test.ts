@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
+import { existsSync, readFileSync } from "node:fs"
 import { join } from "node:path"
-import { Effect, Option } from "effect"
-import { makeScriptedImplementor } from "@xandreed/foundry"
+import { Effect, Option, Schema } from "effect"
+import { FactoryRun, makeScriptedImplementor } from "@xandreed/foundry"
+import { SpecDoc } from "@xandreed/engine"
 import { runForgeSessionWith } from "../forge/session.js"
 import {
   bootTestTui,
@@ -462,7 +464,7 @@ describe("the smith TUI — frame-level regressions", () => {
     expect(frame).toContain("✓ opencode")
     expect(frame).toContain("api key")
     expect(frame).toContain("anthropic")
-    expect(frame).toContain("sessions (:resume)")
+    expect(frame).toContain("sessions")
   })
 
   test(":resume lists previous sessions and REPLAYS one into the live transcript", async () => {
@@ -679,4 +681,261 @@ describe("the smith TUI — session honesty (Esc, :resume)", () => {
     // The replaced story does not carry the interrupted session's line.
     expect(resumed).not.toContain("build me something")
   })
+})
+
+describe("the smith TUI — the dashboard is a menu", () => {
+  const specDoc = (
+    slug: string,
+    status: "draft" | "locked",
+    goal: string,
+    checks: ReadonlyArray<{ readonly name: string; readonly command: string }> = [],
+  ) =>
+    Schema.decodeUnknownSync(SpecDoc)({
+      slug,
+      status,
+      created: "2026-09-04T00:00:00.000Z",
+      ...(status === "locked" ? { locked: "2026-09-04T00:00:00.000Z" } : {}),
+      goal,
+      acceptance: ["bun test exits 0"],
+      constraints: [],
+      nonGoals: [],
+      checks,
+      limits: { maxAttempts: 3, budgetMinutes: 15 },
+      gates: {},
+    })
+  const factoryRun = Schema.decodeUnknownSync(FactoryRun)({
+    id: "22222222-2222-4222-8222-222222222222",
+    spec: {
+      goal: "Port the stats module to TypeScript with tests.",
+      acceptance: ["bun test exits 0"],
+      limits: { maxAttempts: 3, budgetMillis: 1000 },
+    },
+    attempts: [
+      {
+        attempt: 1,
+        report: {
+          verdicts: [
+            { _tag: "pass", gate: "typecheck", durationMs: 1, findings: [] },
+            { _tag: "pass", gate: "bun-test", durationMs: 1, findings: [] },
+          ],
+        },
+        filesTouched: ["src/stats.ts"],
+        durationMs: 5,
+        implementorRef: "conversation:00000000-0000-4000-8000-00000f0110c9",
+      },
+    ],
+    outcome: { _tag: "accepted", attempt: 1 },
+    startedAt: 0,
+    endedAt: 10,
+  })
+
+  test("Tab focuses the dashboard; ↑/↓ move the cursor; ⏎ opens the row's verbs; Esc closes them", async () => {
+    const tui = await boot({
+      specs: [
+        specDoc("stats-module", "locked", "A stats module with tests."),
+        specDoc("cli-flags", "draft", "Parse the flags."),
+      ],
+    })
+    const idle = await waitFrame(tui, (f) => f.includes("cli-flags"))
+    expect(idle).toContain("Tab focuses a row")
+    expect(idle).toContain("Tab → the dashboard")
+    // Specs list alphabetically: the draft cli-flags sits above stats-module.
+    tui.setup.mockInput.pressTab()
+    const focused = await waitFrame(tui, (f) => f.includes("> · cli-flags"))
+    expect(focused).toContain("> · cli-flags")
+    expect(focused).toContain("↑/↓ move · ⏎ act")
+    await settle()
+    tui.setup.mockInput.pressArrow("down")
+    const moved = await waitFrame(tui, (f) => f.includes("> ✓ stats-module"))
+    expect(moved).toContain("> ✓ stats-module")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    const verbs = await waitFrame(tui, (f) => f.includes("spec stats-module — locked"))
+    expect(verbs).toContain("forge")
+    expect(verbs).toContain("open")
+    expect(verbs).toContain("delete")
+    expect(verbs).not.toContain("approve it as-is")
+    await settle()
+    tui.setup.mockInput.pressEscape()
+    const closed = await waitFrame(tui, (f) => !f.includes("spec stats-module — locked"))
+    expect(closed).not.toContain("spec stats-module — locked")
+    expect(Option.isNone(tui.store.dashboardFocus())).toBe(true)
+  })
+
+  test("Tab with text in the composer still completes a command — the dashboard never steals it", async () => {
+    const tui = await boot({ specs: [specDoc("stats-module", "locked", "A stats module.")] })
+    await waitFrame(tui, (f) => f.includes("stats-module"))
+    await tui.setup.mockInput.typeText(":mo")
+    tui.setup.mockInput.pressTab()
+    await tui.frame()
+    expect(tui.store.composerText()).toBe(":model ")
+    expect(Option.isNone(tui.store.dashboardFocus())).toBe(true)
+  })
+
+  test("lock from the menu locks the draft ON DISK and the dashboard shows it", async () => {
+    const tui = await boot({ specs: [specDoc("cli-flags", "draft", "Parse the flags.")] })
+    await waitFrame(tui, (f) => f.includes("· cli-flags"))
+    tui.setup.mockInput.pressTab()
+    await waitFrame(tui, (f) => f.includes("> · cli-flags"))
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("spec cli-flags — draft"))
+    await tui.setup.mockInput.typeText("lock")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    const locked = await waitFrame(tui, (f) => f.includes("locked cli-flags"), 100)
+    expect(locked).toContain("✓ cli-flags")
+    const onDisk = readFileSync(join(tui.cwd, ".efferent", "specs", "cli-flags.md"), "utf8")
+    expect(onDisk).toContain("status: locked")
+  })
+
+  test("open from the menu drops a locked spec into refine mode with :forge armed", async () => {
+    const tui = await boot({
+      // A locked spec with a machine check — the scripted coder satisfies it.
+      specs: [
+        specDoc("stats-module", "locked", "A stats module with tests.", [
+          { name: "out-exists", command: "test -f out.txt" },
+        ]),
+      ],
+      seams: {
+        forgeRunner: (run, publish, doc) =>
+          runForgeSessionWith(
+            run,
+            publish,
+            makeScriptedImplementor([[{ path: "out.txt", content: "done\n" }]], {
+              ref: "conversation:00000000-0000-4000-8000-00000f0110c9",
+            }),
+            doc,
+          ),
+      },
+    })
+    await waitFrame(tui, (f) => f.includes("stats-module"))
+    await tui.setup.mockInput.typeText(":open")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("Open — specs"))
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("spec stats-module — locked"))
+    await tui.setup.mockInput.typeText("open")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    const opened = await waitFrame(tui, (f) => f.includes("opened stats-module (locked)"), 100)
+    expect(opened).toContain("A stats module with tests.")
+    expect(opened).toContain("locked by you")
+    // The opened spec IS the session's draft: :forge builds it right away.
+    await tui.setup.mockInput.typeText(":forge")
+    tui.setup.mockInput.pressEnter()
+    const accepted = await waitFrame(tui, (f) => f.includes("✓ ACCEPTED"), 200)
+    expect(accepted).toContain("✓ ACCEPTED")
+  }, 20_000)
+
+  test("a run's menu replays its report into the floor; follow-up continues THAT coder conversation", async () => {
+    const followUps: Array<{ readonly cid: string; readonly text: string }> = []
+    const tui = await boot({
+      runs: [factoryRun],
+      seams: {
+        followUp: (_run, cid, text, publish) =>
+          Effect.gen(function* () {
+            followUps.push({ cid: String(cid), text })
+            yield* publish({
+              type: "agent",
+              event: {
+                type: "assistant_message",
+                turnIndex: 0,
+                text: "ran the follow-up",
+                reasoning: "",
+                toolCalls: [],
+                usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2, cacheReadTokens: 0 },
+              },
+            })
+          }),
+      },
+    })
+    await waitFrame(tui, (f) => f.includes("accepted (attempt 1)"))
+    await tui.setup.mockInput.typeText(":open")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("Open — specs"))
+    await tui.setup.mockInput.typeText("accepted")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("forge run —"))
+    await tui.setup.mockInput.typeText("follow")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    const replayed = await waitFrame(tui, (f) => f.includes("follow up freely"), 100)
+    // The floor reads like the run just finished — attempt row, gates, verdict.
+    expect(replayed).toContain("#1")
+    expect(replayed).toContain("✓ ACCEPTED after 1 attempt")
+    expect(replayed).toContain("Port the stats module")
+    await tui.setup.mockInput.typeText("poke the edges")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("ran the follow-up"), 200)
+    expect(followUps).toEqual([
+      { cid: "00000000-0000-4000-8000-00000f0110c9", text: "poke the edges" },
+    ])
+  }, 20_000)
+
+  test("delete asks first; confirming removes the spec file and the row", async () => {
+    const tui = await boot({ specs: [specDoc("cli-flags", "draft", "Parse the flags.")] })
+    await waitFrame(tui, (f) => f.includes("· cli-flags"))
+    tui.setup.mockInput.pressTab()
+    await waitFrame(tui, (f) => f.includes("> · cli-flags"))
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("spec cli-flags — draft"))
+    await tui.setup.mockInput.typeText("delete")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    const asked = await waitFrame(tui, (f) => f.includes("delete spec cli-flags?"))
+    expect(asked).toContain("keep it")
+    expect(existsSync(join(tui.cwd, ".efferent", "specs", "cli-flags.md"))).toBe(true)
+    await settle()
+    tui.setup.mockInput.pressArrow("down")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    const gone = await waitFrame(tui, (f) => f.includes("deleted cli-flags"), 100)
+    expect(gone).toContain("no specs yet")
+    expect(existsSync(join(tui.cwd, ".efferent", "specs", "cli-flags.md"))).toBe(false)
+  })
+
+  test(":new after a finished forge leaves no stale status rows on the dashboard", async () => {
+    const tui = await boot({
+      seams: {
+        refineAgent: proposingRefineAgent({
+          goal: "Create out.txt containing done.",
+          acceptance: ["out.txt exists"],
+          checks: [{ name: "out-exists", command: "test -f out.txt" }],
+        }),
+        forgeRunner: (run, publish, doc) =>
+          runForgeSessionWith(
+            run,
+            publish,
+            makeScriptedImplementor([[{ path: "out.txt", content: "done\n" }]], {
+              ref: "conversation:00000000-0000-4000-8000-00000f0110c9",
+            }),
+            doc,
+          ),
+      },
+    })
+    await tui.setup.mockInput.typeText("make an out file")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("Create out.txt containing done."))
+    await tui.setup.mockInput.typeText(":lock")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("locked by you"))
+    await tui.setup.mockInput.typeText(":forge")
+    tui.setup.mockInput.pressEnter()
+    const done = await waitFrame(tui, (f) => f.includes("✓ ACCEPTED"), 200)
+    expect(done).toContain("accepted (attempt 1) · artifact")
+    await waitFrame(tui, (f) => f.includes("follow up freely"), 200)
+    await tui.setup.mockInput.typeText(":new")
+    tui.setup.mockInput.pressEnter()
+    // The run itself is on the dashboard — as a row, where it belongs — and
+    // the dashboard arrives already refreshed (never the previous one).
+    const dashboard = await waitFrame(tui, (f) => f.includes("✓ accepted (attempt 1)"), 200)
+    expect(dashboard).toContain("✓ accepted (attempt 1)")
+    expect(dashboard).not.toContain("accepted (attempt 1) · artifact")
+    expect(dashboard).not.toContain("persisted in .efferent/smith.db")
+    expect(dashboard).not.toContain("follow up freely")
+  }, 20_000)
 })
