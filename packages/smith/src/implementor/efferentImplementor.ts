@@ -1,6 +1,5 @@
-import { join } from "node:path"
 import type { LanguageModel } from "@effect/ai"
-import { Effect, Equal, Layer, Option, Ref } from "effect"
+import { Effect, Layer, Option, Ref } from "effect"
 import { Implementor, ImplementorError } from "@xandreed/foundry"
 import type { QualityBar, WorkspacePath } from "@xandreed/foundry"
 import {
@@ -18,6 +17,8 @@ import type { SmithEvent } from "../domain/SmithEvent.js"
 import { capturePath } from "./filesTouched.js"
 import { discoverSkills, renderSkillsBlock } from "../skills/skills.js"
 import { bashProgressTap, makeSmithCodingHandlers, smithCodingToolkit } from "./codingToolkit.js"
+import { renderExternalToolsBlock } from "./externalTools.js"
+import { armProfileTripwire } from "./profileTripwire.js"
 import {
   renderBrief,
   renderPostFoldRetryBrief,
@@ -115,14 +116,8 @@ export const renderTrailForDigest = (messages: ReadonlyArray<AgentMessage>): str
 /** Bump when `digestPrompt` changes — the digest battery records it. */
 export const DIGEST_PROMPT_VERSION = "1.0.0"
 
-/** Which armed-profile files drifted between two content snapshots (`None`
- * = absent): an edit, a deletion, and a creation all count — the judged
- * must not edit the judge in ANY direction (#111). */
-export const profileDrift = (
-  paths: ReadonlyArray<string>,
-  before: ReadonlyArray<Option.Option<string>>,
-  after: ReadonlyArray<Option.Option<string>>,
-): ReadonlyArray<string> => paths.filter((_, index) => !Equal.equals(before[index], after[index]))
+/** The drift predicate lives with the tripwire; re-exported for the digest battery. */
+export { profileDrift } from "./profileTripwire.js"
 
 /** The handoff instruction — the digest is the ONLY memory the next attempt
  *  keeps, so it must restate the task, the workspace state, and the dead ends. */
@@ -232,13 +227,7 @@ export const makeEfferentImplementorLive = (
       // so the profile is ALSO fingerprinted at forge start and checked
       // after every implement turn. Any drift (edit OR deletion) aborts the
       // run loudly: the judged must not edit the judge.
-      const fs = yield* FileSystem
-      const profilePaths: ReadonlyArray<string> = [
-        join(options.cwd, "foundry.config.ts"),
-        ...protectedPaths,
-      ]
-      const profileSnapshot = Effect.forEach(profilePaths, (path) => fs.read(path).pipe(Effect.option))
-      const armedSnapshot = yield* profileSnapshot
+      const tripwire = yield* armProfileTripwire(options.cwd, protectedPaths)
       // External MCP tools (user-configured servers) merge into the kit —
       // snapshot once per run; an unreachable server yields the empty bridge.
       const mcp = yield* buildMcpBridge
@@ -256,15 +245,7 @@ export const makeEfferentImplementorLive = (
             mcpTools: mcp.descriptors.length,
           })
         : Effect.void
-      const externalTools =
-        mcp.descriptors.length === 0
-          ? ""
-          : `## External MCP tools (user-configured servers — call mcp_describe{server, tool} for a tool's parameter schema, then mcp_call{server, tool, args} to run it)\n${mcp.descriptors
-              .map(
-                (d) =>
-                  `- ${d.server} / ${d.name}: ${Option.getOrElse(d.description, () => "(no description)")}`,
-              )
-              .join("\n")}`
+      const externalTools = renderExternalToolsBlock(mcp.descriptors)
 
       const conversationRef = yield* Ref.make(Option.none<ConversationId>())
       // The latest turn's input tokens ARE the live context cost — tracked
@@ -414,8 +395,7 @@ export const makeEfferentImplementorLive = (
               ),
             )
 
-            const profileNow = yield* profileSnapshot.pipe(Effect.orDie)
-            const drifted = profileDrift(profilePaths, armedSnapshot, profileNow)
+            const drifted = yield* tripwire.check
             yield* drifted.length === 0
               ? Effect.void
               : Effect.fail(

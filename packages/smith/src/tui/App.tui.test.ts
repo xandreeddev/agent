@@ -610,3 +610,73 @@ describe("the smith TUI — frame-level regressions", () => {
     expect(tui.store.vi().mode).toBe("insert")
   }, 15_000)
 })
+
+describe("the smith TUI — session honesty (Esc, :resume)", () => {
+  test("Esc on the idle dashboard clears the composer — it never 'interrupts' a run that isn't there", async () => {
+    const tui = await boot()
+    await waitFrame(tui, (f) => f.includes("describe what to build"))
+    await tui.setup.mockInput.typeText("half a thought")
+    await waitFrame(tui, () => tui.store.composerText() === "half a thought")
+    tui.setup.mockInput.pressEscape()
+    await waitFrame(tui, () => tui.store.composerText() === "")
+    expect(tui.store.composerText()).toBe("")
+    expect(tui.store.notice()).not.toContain("interrupting")
+  })
+
+  test("after a finished forge, Esc interrupts a STALLED follow-up turn (busy resets)", async () => {
+    const tui = await boot({
+      seams: {
+        refineAgent: proposingRefineAgent({
+          goal: "Create out.txt containing done.",
+          acceptance: ["out.txt exists"],
+          checks: [{ name: "out-exists", command: "test -f out.txt" }],
+        }),
+        forgeRunner: (run, publish, doc) =>
+          runForgeSessionWith(
+            run,
+            publish,
+            makeScriptedImplementor(
+              [[{ path: "out.txt", content: "done\n" }]],
+              { ref: "conversation:00000000-0000-4000-8000-00000f0110c9" },
+            ),
+            doc,
+          ),
+        followUp: () => Effect.never,
+      },
+    })
+    await tui.setup.mockInput.typeText("make an out file")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("Create out.txt containing done."))
+    await tui.setup.mockInput.typeText(":lock")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("locked by you"))
+    await tui.setup.mockInput.typeText(":forge")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("✓ ACCEPTED"), 200)
+    await waitFrame(tui, (f) => f.includes("follow up freely"), 200)
+    await tui.setup.mockInput.typeText("poke the edges")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, () => tui.store.busy(), 200)
+    expect(tui.store.busy()).toBe(true)
+    // The floor reads "done" here — before, Esc only looked at the floor and
+    // cleared the composer instead, leaving the stalled turn unreachable.
+    tui.setup.mockInput.pressEscape()
+    const freed = await waitFrame(tui, (f) => f.includes("turn interrupted"), 200)
+    expect(freed).toContain("turn interrupted")
+    expect(tui.store.busy()).toBe(false)
+  })
+
+  test(":resume while a refine turn is STALLED interrupts it and replays into a clean story", async () => {
+    const tui = await boot({ seams: { refineAgent: stalledRefineAgent } })
+    await tui.setup.mockInput.typeText("build me something")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("refining…"))
+    expect(tui.store.busy()).toBe(true)
+    tui.ctx.resume?.("0f0f0f0f-0f0f-4f0f-8f0f-0f0f0f0f0f0f")
+    const resumed = await waitFrame(tui, (f) => f.includes("session resumed"), 200)
+    expect(resumed).toContain("session resumed")
+    expect(tui.store.busy()).toBe(false)
+    // The replaced story does not carry the interrupted session's line.
+    expect(resumed).not.toContain("build me something")
+  })
+})

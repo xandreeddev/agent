@@ -329,8 +329,16 @@ export const dispatch = (ctx: SmithTuiContext, key: Key): void => {
     return
   }
   if (key.name === "escape") {
+    // ONE Esc rule, keyed on what is actually RUNNING: a refine/follow-up
+    // turn (`busy`) or a live forge (forge mode, floor not settled). The
+    // floor alone lied — it boots as "boot" and a dropped refine never
+    // resets it, so a fresh dashboard "interrupted" nothing and a stalled
+    // follow-up after a finished forge could not be interrupted at all.
     const phase = ctx.store.floor().phase
-    if (phase === "implementing" || phase === "gating" || phase === "boot") {
+    const forgeLive =
+      ctx.store.mode() === "forge" &&
+      (phase === "boot" || phase === "implementing" || phase === "gating")
+    if (ctx.store.busy() || forgeLive) {
       ctx.store.setNotice("interrupting the run… (:quit to leave)")
       ctx.interrupt()
       return
