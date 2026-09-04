@@ -109,7 +109,7 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
         </box>
         <ProviderStrip ctx={props.ctx} />
         <Show when={total() > 0}>
-          <text fg={tokens.text.dim} wrapMode="none">
+          <text fg={tokens.text.dim} wrapMode="none" flexShrink={0}>
             {Option.isSome(focus())
               ? "↑/↓ move · ⏎ act on the row · esc back to the composer"
               : "Tab focuses a row · ⏎ acts on it · :open lists everything"}
@@ -206,7 +206,7 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
 
           <box flexDirection="column" width={56} flexShrink={0} marginLeft={2}>
             <SectionHead accent={BRAND.verdigris} label="context — what the model sees (:context)" />
-            <text fg={tokens.text.dim} wrapMode="none">{`  ${contextHeadline(context())}`}</text>
+            <text fg={tokens.text.dim} wrapMode="none" flexShrink={0}>{`  ${contextHeadline(context())}`}</text>
             <For each={context().standing}>
               {(line, index) => (
                 <box flexDirection="row">
@@ -246,7 +246,7 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
               )}
             </For>
             <Show when={context().pins.length === 0}>
-              <text fg={tokens.state.pending} wrapMode="none">
+              <text fg={tokens.state.pending} wrapMode="none" flexShrink={0}>
                 {"  no pins — :context add <path | dir/ | glob | note: … | diff | cmd: …>"}
               </text>
             </Show>
