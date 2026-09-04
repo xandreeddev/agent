@@ -156,6 +156,8 @@ const storeWith = (messages: ReadonlyArray<AgentMessage>) =>
     checkpointAt: () => Effect.void,
     latestCheckpoint: () => Effect.succeed(Option.none()),
     setTitle: () => Effect.void,
+    recordOutcome: () => Effect.void,
+    latestOutcome: () => Effect.succeed(Option.none()),
     listByWorkspace: () => Effect.succeed([]),
     fork: (id) => Effect.succeed(id),
     prune: () => Effect.succeed(0),

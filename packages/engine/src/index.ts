@@ -38,6 +38,7 @@ export type { LoopEvent, ToolCallSummary } from "./domain/loop-event.entity.js"
 export {
   ConversationStore,
   ConversationSummary,
+  RunOutcomeRecord,
   StoredMessage,
   StoreError,
 } from "./ports/conversation-store.port.js"

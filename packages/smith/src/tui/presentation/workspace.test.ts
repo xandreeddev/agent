@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Option, Schema } from "effect"
-import { SpecDoc } from "@xandreed/engine"
+import { ConversationId, ConversationSummary, SpecDoc } from "@xandreed/engine"
 import { FactoryRun } from "@xandreed/foundry"
 import { runLine, workspaceView } from "./workspace.js"
 
@@ -80,5 +80,28 @@ describe("workspaceView — the idle dashboard model", () => {
   test("runLine renders both outcomes", () => {
     expect(runLine(run(true, 0)).text).toContain("✓ accepted (attempt 1)")
     expect(runLine(run(false, 2)).text).toContain("✗ rejected — attempts-exhausted")
+  })
+})
+
+describe("the sessions list — how each run ended", () => {
+  test("a recorded outcome shows as `ok` or `partial (reason)`; none before a run finished", () => {
+    const summary = (id: string, lastOutcome: ConversationSummary["lastOutcome"]) =>
+      new ConversationSummary({
+        id: ConversationId.make(id),
+        createdAt: 0,
+        firstPrompt: Option.some("build it"),
+        title: Option.none(),
+        lastOutcome,
+      })
+    const view = workspaceView([], [], Option.none(), [], [
+      summary("00000000-0000-4000-8000-000000000001", Option.some({ outcome: "ok", reason: "completed" })),
+      summary("00000000-0000-4000-8000-000000000002", Option.some({ outcome: "partial", reason: "step-cap" })),
+      summary("00000000-0000-4000-8000-000000000003", Option.none()),
+    ], 60_000)
+    expect(view.sessions.map((s) => Option.getOrElse(s.outcome, () => "-"))).toEqual([
+      "ok",
+      "partial (step-cap)",
+      "-",
+    ])
   })
 })

@@ -295,3 +295,25 @@ describe("SqliteConversationStoreLive — one turn, one write", () => {
     )
   })
 })
+
+describe("SqliteConversationStoreLive — how a run ended is on record", () => {
+  test("recordOutcome appends; latestOutcome and the workspace listing read the newest; none before any run", async () => {
+    await withStore(
+      Effect.gen(function* () {
+        const store = yield* ConversationStore
+        const id = yield* store.create("/ws")
+        yield* store.append(id, user("go"))
+        expect(Option.isNone(yield* store.latestOutcome(id))).toBe(true)
+        expect(Option.isNone((yield* store.listByWorkspace("/ws"))[0]!.lastOutcome)).toBe(true)
+        yield* store.recordOutcome(id, "partial", "step-cap")
+        yield* store.recordOutcome(id, "ok", "completed")
+        const latest = Option.getOrThrow(yield* store.latestOutcome(id))
+        expect(latest.outcome).toBe("ok")
+        expect(latest.reason).toBe("completed")
+        expect(latest.conversationId).toBe(id)
+        const listed = yield* store.listByWorkspace("/ws")
+        expect(Option.getOrThrow(listed[0]!.lastOutcome)).toEqual({ outcome: "ok", reason: "completed" })
+      }),
+    )
+  })
+})

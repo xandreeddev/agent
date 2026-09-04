@@ -194,9 +194,7 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
                       {`${glyph.bullet} ${session.label}`}
                     </text>
                     <text fg={tokens.text.dim} wrapMode="none" flexShrink={0}>
-                      {session.ageMinutes < 60
-                        ? `  ${session.ageMinutes}m ago`
-                        : `  ${Math.round(session.ageMinutes / 60)}h ago`}
+                      {`${session.ageMinutes < 60 ? `  ${session.ageMinutes}m ago` : `  ${Math.round(session.ageMinutes / 60)}h ago`}${Option.match(session.outcome, { onNone: () => "", onSome: (o) => ` · ${o}` })}`}
                     </text>
                   </box>
                 )}
