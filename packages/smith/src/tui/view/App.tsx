@@ -18,6 +18,7 @@ import { OverlayView } from "./Overlay.js"
 import { Workspace } from "./Workspace.js"
 import { computePalette } from "../presentation/palette.js"
 import { dashboardRows } from "../presentation/dashboard.js"
+import { contextHeadline, pinLine, standingLine } from "../presentation/contextView.js"
 
 const cellColor = (state: GateCell["state"]): string =>
   state === "pass"
@@ -525,6 +526,37 @@ const ProfilePanel = (props: { ctx: SmithTuiContext }) => {
 
 /** The side column: the flow stepper pinned on top, the artifact (spec or
  *  attempts) SCROLLABLE below — 40% of the terminal, never a fixed 52. */
+/** The context set as the model sees it — every source with its size; the
+ *  standing ones the harness discovers, the pins the human added. */
+const ContextPanel = (props: { ctx: SmithTuiContext }) => {
+  const view = props.ctx.store.context
+  return (
+    <box flexDirection="column" marginTop={1}>
+      <box flexDirection="row">
+        <text fg={tokens.text.dim} flexGrow={1}>context</text>
+        <text fg={tokens.text.dim} flexShrink={0} wrapMode="none">{contextHeadline(view())}</text>
+      </box>
+      <For each={view().standing}>
+        {(line) => (
+          <text fg={line.on ? tokens.text.default : tokens.text.dim} wrapMode="none">
+            {`  ${line.on ? glyph.pass : glyph.skip} ${standingLine(line)}`}
+          </text>
+        )}
+      </For>
+      <For each={view().pins}>
+        {(line) => (
+          <text fg={line.on ? tokens.text.default : tokens.text.dim} wrapMode="none">
+            {`  ${line.on ? glyph.bullet : glyph.skip} ${pinLine(line)}`}
+          </text>
+        )}
+      </For>
+      <Show when={view().pins.length === 0}>
+        <text fg={tokens.state.pending} wrapMode="none">{"  no pins — :context add <ref>"}</text>
+      </Show>
+    </box>
+  )
+}
+
 const SidePanel = (props: { ctx: SmithTuiContext; artifact: "profile" | "spec" | "attempts" }) => {
   const dimensions = useTerminalDimensions()
   const width = () => Math.max(44, Math.floor(dimensions().width * 0.4))
@@ -542,9 +574,12 @@ const SidePanel = (props: { ctx: SmithTuiContext; artifact: "profile" | "spec" |
         <Show
           when={props.artifact === "profile"}
           fallback={
-            <Show when={props.artifact === "spec"} fallback={<AttemptPanel ctx={props.ctx} />}>
-              <SpecPanel ctx={props.ctx} />
-            </Show>
+            <>
+              <Show when={props.artifact === "spec"} fallback={<AttemptPanel ctx={props.ctx} />}>
+                <SpecPanel ctx={props.ctx} />
+              </Show>
+              <ContextPanel ctx={props.ctx} />
+            </>
           }
         >
           <ProfilePanel ctx={props.ctx} />
@@ -871,7 +906,7 @@ const ComposerFrame = (props: { ctx: SmithTuiContext }) => {
   // The idle screen's footer points at the dashboard menu — once there is
   // something on it to act on.
   const hint = () =>
-    store.mode() === "idle" && dashboardRows(store.workspace()).length > 0
+    store.mode() === "idle" && dashboardRows(store.workspace(), store.context()).length > 0
       ? Option.isSome(store.dashboardFocus())
         ? "↑/↓ move · ⏎ act · esc back to the composer"
         : ": for commands · Tab → the dashboard"

@@ -18,7 +18,7 @@ import type { SmithTuiContext } from "../state/store.js"
  */
 
 export const openDashboardMenu = (ctx: SmithTuiContext): void => {
-  const rows = dashboardRows(ctx.store.workspace())
+  const rows = dashboardRows(ctx.store.workspace(), ctx.store.context())
   if (rows.length === 0) {
     ctx.store.setNotice("nothing to open yet — describe what to build")
     return
@@ -43,14 +43,14 @@ export const openRowActions = (ctx: SmithTuiContext, row: DashboardRow): void =>
 /** The row under the dashboard cursor, if any. */
 export const focusedRow = (ctx: SmithTuiContext): Option.Option<DashboardRow> =>
   Option.flatMap(ctx.store.dashboardFocus(), (index) =>
-    Option.fromNullable(dashboardRows(ctx.store.workspace())[index]),
+    Option.fromNullable(dashboardRows(ctx.store.workspace(), ctx.store.context())[index]),
   )
 
 /** ⏎ on the `:open` list — that row's actions. */
 export const submitDashboardPick = (ctx: SmithTuiContext, value: Option.Option<string>): void => {
   ctx.store.closeOverlay()
   Option.match(
-    Option.flatMap(value, (key) => findRow(dashboardRows(ctx.store.workspace()), key)),
+    Option.flatMap(value, (key) => findRow(dashboardRows(ctx.store.workspace(), ctx.store.context()), key)),
     {
       onNone: () => ctx.store.setNotice("nothing selected"),
       onSome: (row) => openRowActions(ctx, row),
@@ -101,6 +101,15 @@ export const submitRowAction = (
     }),
     Match.when({ kind: "session" }, (session) => {
       if (verb === "resume") return ctx.resume?.(session.id)
+      return ctx.store.setNotice(`no such action: ${verb}`)
+    }),
+    Match.when({ kind: "context-standing" }, (source) => {
+      if (verb === "toggle") return ctx.context?.toggle(source.name)
+      return ctx.store.setNotice(`no such action: ${verb}`)
+    }),
+    Match.when({ kind: "context-pin" }, (pin) => {
+      if (verb === "toggle") return ctx.context?.setPin(String(pin.index + 1), !pin.on)
+      if (verb === "remove") return ctx.context?.drop(String(pin.index + 1))
       return ctx.store.setNotice(`no such action: ${verb}`)
     }),
     Match.when({ kind: "lesson" }, (lesson) => ctx.store.setNotice(lesson.text)),

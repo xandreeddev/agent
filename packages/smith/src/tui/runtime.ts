@@ -1,9 +1,27 @@
 import { createCliRenderer } from "@opentui/core"
 import { render } from "@opentui/solid"
 import { createComponent } from "solid-js"
-import { Deferred, Effect, Fiber, Option, Queue, Ref, Runtime, Schema, Scope } from "effect"
+import { Deferred, Effect, Either, Fiber, Option, Queue, Ref, Runtime, Schema, Scope } from "effect"
+import { assembleContext, bundleSummary, fmtChars } from "../context/assemble.js"
+import type { ContextSet, StandingSource } from "../context/context-set.entity.js"
+import {
+  clearPins,
+  findPinIndex,
+  isStandingOn,
+  parsePinRef,
+  renderPinRef,
+  setPinOn,
+  toggleStanding,
+  withBudget,
+  withPin,
+  withoutPin,
+} from "../context/context-set.entity.functions.js"
+import { contextAssembledEvent, makeContextInjector, withContextBlock } from "../context/inject.js"
+import { loadStandingSources } from "../context/standing.js"
+import { loadContextSet, saveContextSet } from "../context/store.js"
+import { contextView } from "./presentation/contextView.js"
 import { FileSystem, SettingsStore } from "@xandreed/engine"
-import type { AuthStore, ModelCatalog } from "@xandreed/engine"
+import type { AuthStore, ModelCatalog, Shell } from "@xandreed/engine"
 import type { SpecDoc } from "@xandreed/engine"
 import type { SmithEvent } from "../domain/SmithEvent.js"
 import type { SmithRunConfig } from "../domain/SmithConfig.js"
@@ -430,7 +448,21 @@ export const makeWorkspaceBody = (
         "google",
         "opencode",
       ]
+      // The context set's panel model — re-measured after every change and
+      // every workspace refresh; shell-backed pins stay DEFERRED here (a
+      // refresh must never run the human's commands — a turn does).
+      const refreshContext = Effect.gen(function* () {
+        const set = yield* loadContextSet(run.cwd)
+        const standing = yield* loadStandingSources(run.cwd, set, run.configPath)
+        const bundle = yield* assembleContext(run.cwd, set, { execute: false })
+        yield* Effect.sync(() => store.setContext(contextView(set, standing, bundle)))
+      })
+      // Follow-up turns carry the pins the way refine turns do: once, and
+      // again when the human changes them (one injector per session).
+      const contextInjector = yield* makeContextInjector(run.cwd, publish)
+
       const refreshWorkspace = Effect.gen(function* () {
+        yield* refreshContext
         const slugs = yield* listSpecs(run.cwd)
         const docs = yield* Effect.forEach(slugs, (slug) =>
           loadSpecDoc(run.cwd, slug).pipe(
@@ -478,7 +510,7 @@ export const makeWorkspaceBody = (
       const turn = (
         session: RefineSession,
         text: string,
-      ): Effect.Effect<void, never, FileSystem | ConversationStore | AuthStore> =>
+      ): Effect.Effect<void, never, FileSystem | Shell | ConversationStore | AuthStore> =>
         Effect.gen(function* () {
           yield* Effect.sync(() => {
             store.addUserLine(text)
@@ -628,7 +660,7 @@ export const makeWorkspaceBody = (
       const autoTitle = (
         cid: ConversationId,
         firstText: string,
-      ): Effect.Effect<void, never, ConversationStore | UtilityLlm | AuthStore | FileSystem> =>
+      ): Effect.Effect<void, never, ConversationStore | UtilityLlm | AuthStore | FileSystem | Shell> =>
         Effect.gen(function* () {
           const conv = yield* ConversationStore
           const utility = yield* UtilityLlm
@@ -836,10 +868,11 @@ export const makeWorkspaceBody = (
                       store.addUserLine(text)
                       store.setBusy(true)
                     })
+                    const block = yield* contextInjector.next
                     yield* (seams.followUp ?? runFollowUpTurn)(
                       run,
                       target.value,
-                      text,
+                      withContextBlock(block, text),
                       publish,
                       steerFromQueue(store),
                     ).pipe(Effect.catchAll((error) =>
@@ -997,6 +1030,98 @@ export const makeWorkspaceBody = (
         )
       }
 
+      /** One context-set change: load → transform (or refuse with a
+       *  notice) → save → re-measure the panel → say what happened. */
+      const updateContext = (
+        label: string,
+        change: (set: ContextSet) => Either.Either<{ readonly set: ContextSet; readonly notice: string }, string>,
+      ): void => {
+        forked(
+          label,
+          Effect.gen(function* () {
+            const set = yield* loadContextSet(run.cwd)
+            yield* Either.match(change(set), {
+              onLeft: (message) => Effect.sync(() => store.setNotice(message)),
+              onRight: (next) =>
+                saveContextSet(run.cwd, next.set).pipe(
+                  Effect.zipRight(refreshContext),
+                  Effect.zipRight(Effect.sync(() => store.setNotice(next.notice))),
+                  Effect.catchAll((error) => Effect.sync(() => store.setNotice(error.message))),
+                ),
+            })
+          }),
+        )
+      }
+
+      const pinAt = (set: ContextSet, token: string) =>
+        Either.fromOption(findPinIndex(set, token), () => `no such pin: ${token} (:context lists them by number)`)
+
+      const contextActions = {
+        add: (ref: string) =>
+          updateContext("context add", (set) =>
+            Either.map(parsePinRef(ref), (pin) => ({
+              set: withPin(set, pin),
+              notice: `pinned ${renderPinRef(pin)} — :context show previews what the next turn carries`,
+            })),
+          ),
+        drop: (token: string) =>
+          updateContext("context drop", (set) =>
+            Either.map(pinAt(set, token), (index) => ({
+              set: withoutPin(set, index),
+              notice: `dropped ${renderPinRef(set.pins[index]!)}`,
+            })),
+          ),
+        toggle: (name: StandingSource) =>
+          updateContext("context toggle", (set) =>
+            Either.right({
+              set: toggleStanding(set, name),
+              notice: `${name} ${isStandingOn(set, name) ? "off — the model stops seeing it" : "on"}`,
+            }),
+          ),
+        set: (name: StandingSource, on: boolean) =>
+          updateContext("context set", (set) =>
+            isStandingOn(set, name) === on
+              ? Either.left(`${name} is already ${on ? "on" : "off"}`)
+              : Either.right({ set: toggleStanding(set, name), notice: `${name} ${on ? "on" : "off"}` }),
+          ),
+        setPin: (token: string, on: boolean) =>
+          updateContext("context pin", (set) =>
+            Either.map(pinAt(set, token), (index) => ({
+              set: setPinOn(set, index, on),
+              notice: `${renderPinRef(set.pins[index]!)} ${on ? "on" : "off"}`,
+            })),
+          ),
+        preview: () => {
+          forked(
+            "context show",
+            Effect.gen(function* () {
+              const set = yield* loadContextSet(run.cwd)
+              if (set.pins.length === 0) {
+                yield* Effect.sync(() => store.setNotice("no pins — :context add <ref> pins a file, a dir/, a glob, a note, a diff, a command"))
+                return
+              }
+              const standing = yield* loadStandingSources(run.cwd, set, run.configPath)
+              const bundle = yield* assembleContext(run.cwd, set, { execute: true })
+              yield* Effect.sync(() => store.setContext(contextView(set, standing, bundle)))
+              yield* publish(contextAssembledEvent(bundle, false))
+              yield* Effect.sync(() =>
+                store.setNotice(`context preview: ${bundleSummary(bundle)} — ${fmtChars(bundle.totalChars)} chars`),
+              )
+            }),
+          )
+        },
+        clear: () =>
+          updateContext("context clear", (set) =>
+            set.pins.length === 0
+              ? Either.left("no pins to clear")
+              : Either.right({ set: clearPins(set), notice: `cleared ${set.pins.length} pin(s)` }),
+          ),
+        budget: (chars: number) =>
+          updateContext("context budget", (set) =>
+            Either.right({ set: withBudget(set, chars), notice: `pins budget ${fmtChars(withBudget(set, chars).budgetChars)} chars` }),
+          ),
+      }
+
       const teardown = (): void => {
         // A live forge fiber and any OAuth loopback server must die BEFORE
         // the renderer restores, or the process outlives the terminal.
@@ -1092,6 +1217,7 @@ export const makeWorkspaceBody = (
             forked("follow-up", replayRun(id, true))
           },
         },
+        context: contextActions,
         resume: resumeSession,
         branch: () => {
           forked(
