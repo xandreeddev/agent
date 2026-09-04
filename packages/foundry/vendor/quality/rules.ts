@@ -22,14 +22,16 @@ const walk = (root: ts.Node, visit: (node: ts.Node) => void): void => {
 }
 
 const SKIP_PROPS = new Set(["skip", "todo"])
+/** `.only` is the stronger gaming vector: it hides every OTHER test. */
+const ONLY_PROP = "only"
 const RUNNER_OBJECTS = new Set(["test", "it", "describe", "suite"])
 const SKIP_IDENTIFIERS = new Set(["xit", "xdescribe", "xtest"])
 
 export const noSkippedTests = {
   id: "quality/no-skipped-tests",
   defaultSeverity: "error",
-  description: "skipped/todo tests are banned — a skipped test is invisible to the test gate",
-  fixHint: "make the test pass or delete it deliberately — never park it where the gate can't see it",
+  description: "skipped/todo/only tests are banned — a skipped test is invisible to the test gate, a focused one hides every other",
+  fixHint: "make the test pass or delete it deliberately — never park it where the gate can't see it, never focus one and leave the rest dark",
   check: ({ sourceFile }: VendoredRuleContext): ReadonlyArray<VendoredMatch> => {
     const matches: Array<VendoredMatch> = []
     walk(sourceFile, (node) => {
@@ -44,6 +46,17 @@ export const noSkippedTests = {
         matches.push({
           node,
           message: `\`${callee.expression.text}.${callee.name.text}\` hides this test from the gate`,
+        })
+      }
+      if (
+        ts.isPropertyAccessExpression(callee) &&
+        ts.isIdentifier(callee.expression) &&
+        RUNNER_OBJECTS.has(callee.expression.text) &&
+        callee.name.text === ONLY_PROP
+      ) {
+        matches.push({
+          node,
+          message: `\`${callee.expression.text}.only\` hides every OTHER test in this file from the gate`,
         })
       }
       if (ts.isIdentifier(callee) && SKIP_IDENTIFIERS.has(callee.text)) {

@@ -112,10 +112,10 @@ would judge attempt N against attempt N-1's source).
    monorepo's `cli → adapters → core` rule a real gate.
 3. **`typecheck`** — `ts.getPreEmitDiagnostics` on the shared program (no
    subprocess, exact positions) → `ts/<code>` findings.
-4. **`eval-shape`** — `evals/nonempty-scorers` (the silent-0 hole),
-   `evals/explicit-threshold` (the decorative-threshold hole),
-   `evals/registered` (a suite not imported by the registry silently never
-   runs).
+
+(The `eval-shape` gate was retired 2026-09-05: its rules targeted the deleted
+evals-v2 API and nothing armed it; the v3 scenario runner enforces non-empty
+steps and checks at runtime.)
 
 ## The loop — `forge`
 
@@ -201,8 +201,8 @@ sdk-core migrates incrementally instead of big-bang.
   Effect-idiom, or dependency-direction violation is new and fails.
 - ~~Evals v2 (structure)~~ — SHIPPED: `EvalSpec.scorers` is non-empty BY
   TYPE, `threshold` is required and honored per-suite by `run.ts`'s gate
-  (the hardcoded 0.6 is gone); the eval-shape gate polices
-  `packages/evals` in the repo suite. Still open from the v2 contract:
+  (the hardcoded 0.6 is gone); the eval-shape gate that policed
+  `packages/evals` went with v2. Still open from the v2 contract:
   trajectory-typed scorers (`ScorerArgsV2.trajectory`) and the branded
   `Score` in the runner.
 - ~~Runtime integration (first seam)~~ — SHIPPED: `makeJudgeGate` (rank-4,

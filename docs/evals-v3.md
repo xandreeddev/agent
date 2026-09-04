@@ -156,12 +156,13 @@ get one new drill level (step), nothing else moves.
 an `EvalCase[]`-shaped table into single-step scenarios, so migrating a v2
 one-shot suite is mechanical.
 
-## What the foundry `eval-shape` gate enforces after v3
+## The `eval-shape` gate (retired)
 
-Registration in `run.ts` · `threshold` present · scenarios non-empty · every
-step's `checks` non-empty · every scenario name unique in its suite. (The
-non-empty rules are BY TYPE too, as in v2; the gate catches the `as never`
-escape hatches.)
+There is no static eval-shape gate on v3: the one that shipped targeted the
+deleted v2 API (`defineEval`/`scorers`) and nothing ever armed it, so it was
+removed on 2026-09-05. What v3 enforces, it enforces at runtime in `run.ts`:
+scenarios non-empty, every step's `checks` non-empty, scenario names unique
+in their suite, a threshold per pack.
 
 ## Phasing
 

@@ -276,15 +276,16 @@ if (isDirectRun) {
   // stdout with anything but JSON-RPC.
   if (command === "mcp") {
     const { runMcpServe } = await import("./mcp/serve.js")
+    // Serving never returns on its own; a failure prints and exits 2 below.
     await Effect.runPromise(
       runMcpServe(state.cwd).pipe(
         Effect.catchAll((cause) =>
           Effect.sync(() => {
             console.error(`smith mcp: ${String(cause)}`)
-            return undefined as never
           }),
         ),
-      ) as Effect.Effect<never>,
+        Effect.asVoid,
+      ),
     )
     process.exit(2)
   }

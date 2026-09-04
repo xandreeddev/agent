@@ -25,13 +25,12 @@ export * from "./pipeline/runPipeline.js"
 // gates
 export * from "./gates/astWalk.js"
 export * from "./gates/boundariesGate.js"
-export * from "./gates/evalShapeGate.js"
 export * from "./gates/idiomGate.js"
 export * from "./gates/judgeGate.js"
 export * from "./gates/renderQualityBar.js"
 export * from "./gates/rules/index.js"
 export * from "./gates/withBaseline.js"
-export * from "./gates/TsProject.js"
+export * from "./gates/TsProject.port.js"
 export * from "./gates/typecheckGate.js"
 
 // adapters

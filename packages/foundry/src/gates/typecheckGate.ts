@@ -6,7 +6,7 @@ import { GateCrash } from "../domain/Errors.js"
 import { Finding, SourceLocation } from "../domain/Finding.js"
 import type { Gate, Workspace } from "../ports/Gate.js"
 import { toWorkspacePath } from "./astWalk.js"
-import { TsProject } from "./TsProject.js"
+import { TsProject } from "./TsProject.port.js"
 
 export const TYPECHECK_GATE = GateName.make("typecheck")
 

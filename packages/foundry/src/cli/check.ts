@@ -10,12 +10,11 @@ import { BaselineFile, diffAgainstBaseline, fingerprint } from "../domain/baseli
 import type { FingerprintedFinding } from "../domain/baseline.js"
 import { runPipeline } from "../pipeline/runPipeline.js"
 import { makeBoundariesGate } from "../gates/boundariesGate.js"
-import { makeEvalShapeGate } from "../gates/evalShapeGate.js"
 import { makeIdiomGate } from "../gates/idiomGate.js"
 import type { IdiomRule } from "../gates/idiomGate.js"
 import { decodeRegistry } from "../gates/rules/custom.js"
 import { makeTypecheckGate } from "../gates/typecheckGate.js"
-import type { TsProject } from "../gates/TsProject.js"
+import type { TsProject } from "../gates/TsProject.port.js"
 import { renderFindingLine, renderReport, renderReportSummary } from "./report.js"
 
 export interface CheckArgs {
@@ -80,10 +79,6 @@ export const gatesFromConfig = (
   ...Option.match(config.boundaries, {
     onNone: () => [] as ReadonlyArray<Gate<TsProject>>,
     onSome: (layers) => [makeBoundariesGate(layers, config.tsconfig)],
-  }),
-  ...Option.match(config.evalShape, {
-    onNone: () => [] as ReadonlyArray<Gate<TsProject>>,
-    onSome: (evalShape) => [makeEvalShapeGate(evalShape, config.tsconfig)],
   }),
   ...(config.typecheck ? [makeTypecheckGate(config.tsconfig)] : []),
 ]
@@ -161,7 +156,7 @@ export const runCheck = (
         new ConfigError({
           path: args.configPath,
           message:
-            "the config describes no runnable static gates (no rules, no boundaries, no evalShape, typecheck off) — nothing to check",
+            "the config describes no runnable static gates (no rules, no boundaries, typecheck off) — nothing to check",
         }),
       )
     }

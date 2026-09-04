@@ -4,7 +4,7 @@ import * as path from "node:path"
 import { LayerConfig } from "../domain/Rules.js"
 import type { Workspace } from "../ports/Gate.js"
 import { makeBoundariesGate } from "./boundariesGate.js"
-import { TsProjectCachedLive } from "./TsProject.js"
+import { TsProjectCachedLive } from "./TsProject.port.js"
 
 const rootDir = path.resolve(import.meta.dir, "../../fixtures/boundaries")
 const ws: Workspace = { rootDir, files: [] }

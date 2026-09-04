@@ -3,7 +3,7 @@ import { Effect, Option } from "effect"
 import * as path from "node:path"
 import type { Workspace } from "../ports/Gate.js"
 import { makeTypecheckGate } from "./typecheckGate.js"
-import { TsProjectCachedLive } from "./TsProject.js"
+import { TsProjectCachedLive } from "./TsProject.port.js"
 
 const rootDir = path.resolve(import.meta.dir, "../../fixtures/typecheck")
 const ws: Workspace = { rootDir, files: [] }

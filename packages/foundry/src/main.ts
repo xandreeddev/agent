@@ -2,7 +2,7 @@ import { Effect, Match, Option } from "effect"
 import { runCheck } from "./cli/check.js"
 import { runDemo } from "./cli/demo.js"
 import type { DemoImplementor } from "./cli/demo.js"
-import { TsProjectCachedLive } from "./gates/TsProject.js"
+import { TsProjectCachedLive } from "./gates/TsProject.port.js"
 
 /**
  * The foundry CLI driver — argv at the edge, Layers composed here, nothing

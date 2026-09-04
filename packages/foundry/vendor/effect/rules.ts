@@ -230,6 +230,22 @@ export const noAsAny = {
   },
 }
 
+export const noAsNever = {
+  id: "effect/no-as-never",
+  defaultSeverity: "error",
+  description: "`as never` is banned outside the declared type-erasure boundary",
+  fixHint: "fix the type, decode with Schema at the boundary, or name the file in the rule's `exclude` if erasure is the design there",
+  check: ({ sourceFile }: VendoredRuleContext): ReadonlyArray<VendoredMatch> => {
+    const matches: Array<VendoredMatch> = []
+    walk(sourceFile, (node) => {
+      if (ts.isAsExpression(node) && node.type.kind === ts.SyntaxKind.NeverKeyword) {
+        matches.push({ node, message: "`as never` launders the type like `as any`" })
+      }
+    })
+    return matches
+  },
+}
+
 const ID_SHAPED = /^(id|[a-zA-Z]*Id)$/
 
 const isBareSchemaPrimitive = (expr: ts.Expression): boolean =>
@@ -313,6 +329,7 @@ export const rules = [
   noNullableReturn,
   matchOverTagSwitch,
   noAsAny,
+  noAsNever,
   brandedIdFields,
   noParallelInterface,
 ]
