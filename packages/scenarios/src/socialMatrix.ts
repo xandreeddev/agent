@@ -15,10 +15,11 @@ import {
   XPlatform,
 } from "@xandreed/social"
 import type { BlogPost, XSearchResult } from "@xandreed/social"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdtempSync, rmSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
-import { dirname, join } from "node:path"
-import { wilsonInterval } from "./framework/stats.js"
+import { join } from "node:path"
+import { argValue, csv, fileStamp, grid, hasFlag, persistJson, positiveInt, runCampaign, runMatrixMain, trialFileName } from "./framework/campaign.js"
+import { mean, percentile, wilsonInterval } from "./framework/stats.js"
 import { generalTierCall, preflightAuth } from "./live/llm.js"
 
 /**
@@ -148,32 +149,6 @@ const TASKS: ReadonlyArray<MatrixTask> = [
 
 const DEFAULT_MODELS: ReadonlyArray<string> = ["openai-codex:gpt-5.6-luna", "opencode:glm-5.2"]
 const DEFAULT_EFFORTS: ReadonlyArray<Effort> = ["low", "medium"]
-
-const argValue = (name: string): Option.Option<string> => {
-  const at = process.argv.indexOf(name)
-  return Option.fromNullable(at < 0 ? undefined : process.argv[at + 1])
-}
-
-const csv = (name: string, fallback: ReadonlyArray<string>): ReadonlyArray<string> => Option.match(argValue(name), {
-  onNone: () => fallback,
-  onSome: (value) => value.split(",").map((entry) => entry.trim()).filter(Boolean),
-})
-
-const positiveInt = (name: string, fallback: number): number => Option.match(argValue(name), {
-  onNone: () => fallback,
-  onSome: (value) => {
-    const parsed = Math.floor(Number(value))
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
-  },
-})
-
-const percentile = (values: ReadonlyArray<number>, q: number): number => {
-  if (values.length === 0) return Number.POSITIVE_INFINITY
-  const ordered = [...values].sort((a, b) => a - b)
-  return ordered[Math.min(ordered.length - 1, Math.max(0, Math.ceil(q * ordered.length) - 1))]!
-}
-
-const mean = (values: ReadonlyArray<number>): number => values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length
 
 const selectedModel = (candidate: Candidate) => Effect.gen(function* () {
   const selection = Option.getOrThrow(parseModelSelection(candidate.model))
@@ -310,35 +285,6 @@ const failedTrial = (candidate: Candidate, task: MatrixTask, sample: number, err
   }
 }
 
-/** Disconnect + hard wall-clock cap (the uiMatrix v9 lesson). */
-const cappedTrial = (capMs: number, trial: Effect.Effect<Trial, unknown>): Effect.Effect<Trial, unknown> => trial.pipe(
-  Effect.disconnect,
-  Effect.timeoutFail({
-    duration: Duration.millis(capMs),
-    onTimeout: () => `trial exceeded the ${capMs}ms hard wall-clock cap; its runtime was abandoned in the background`,
-  }),
-)
-
-const containTrialFailure = (
-  candidate: Candidate,
-  task: MatrixTask,
-  sample: number,
-  trial: Effect.Effect<Trial, unknown>,
-): Effect.Effect<Trial> => trial.pipe(
-  Effect.catchAllCause((cause) => Effect.succeed(failedTrial(candidate, task, sample, Cause.pretty(cause)))),
-)
-
-const persist = (path: string, value: unknown): Effect.Effect<void, Error> => Effect.try({
-  try: () => {
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`)
-  },
-  catch: (cause) => new Error(`failed to persist social matrix: ${String(cause)}`),
-})
-
-const trialName = (trial: Trial): string =>
-  `${trial.candidate.model}-${trial.candidate.effort}-${trial.task}-${trial.sample}`.replaceAll(/[^a-z0-9.-]+/gi, "-").toLowerCase()
-
 interface RankedCandidate {
   readonly candidate: Candidate
   readonly trials: ReadonlyArray<Trial>
@@ -383,22 +329,27 @@ const program = Effect.gen(function* () {
   const samples = positiveInt("--samples", 2)
   const concurrency = positiveInt("--concurrency", 3)
   const turnTimeoutMs = positiveInt("--turn-timeout-ms", 120_000)
-  const output = Option.getOrElse(argValue("--output"), () => `.efferent/evals/social-matrix-${new Date().toISOString().replaceAll(/[:.]/g, "-")}.json`)
+  const output = Option.getOrElse(argValue("--output"), () => `.efferent/evals/social-matrix-${fileStamp()}.json`)
   const evidenceDir = output.replace(/\.json$/, "-evidence")
   const judge = generalTierCall(process.cwd())
 
   const candidates = models.flatMap((model) => efforts.map((effort): Candidate => ({ model, effort })))
-  const combinations = candidates.flatMap((candidate) => TASKS.flatMap((task) =>
-    Array.from({ length: samples }, (_, sample) => ({ candidate, task, sample: sample + 1 }))))
-  console.log(`social-matrix: ${candidates.length} candidates × ${TASKS.length} fixtures × ${samples} sample(s) = ${combinations.length} trials · concurrency=${concurrency} · prompt=${SOCIAL_PROMPT_VERSION} · judge rubric=${JUDGE_RUBRIC_VERSION}`)
+  const cells = grid(candidates, TASKS, samples)
+  console.log(`social-matrix: ${candidates.length} candidates × ${TASKS.length} fixtures × ${samples} sample(s) = ${cells.length} trials · concurrency=${concurrency} · prompt=${SOCIAL_PROMPT_VERSION} · judge rubric=${JUDGE_RUBRIC_VERSION}`)
 
-  const trials = yield* Effect.forEach(combinations, ({ candidate, task, sample }) =>
-    Effect.logInfo(`social-matrix ${candidate.model} effort=${candidate.effort} fixture=${task.id} sample=${sample}`).pipe(
-      Effect.zipRight(containTrialFailure(candidate, task, sample, cappedTrial(turnTimeoutMs + 90_000, runTrial(candidate, task, sample, turnTimeoutMs, judge)))),
-      Effect.tap((trial) => persist(join(evidenceDir, "trials", `${trialName(trial)}.json`), { version: "social-trial-v1", recordedAt: new Date().toISOString(), trial }).pipe(Effect.catchAll((error) => Effect.logWarning(String(error))))),
-      Effect.tap((trial) => Effect.sync(() => console.log(`  ${candidate.model} ${candidate.effort} ${task.id}: drafted=${trial.drafted} correct=${trial.decisionCorrect} bounces=${trial.gateRejections} link=${trial.selfLink} judge=${trial.judge === null ? "-" : ((trial.judge.substance + trial.judge.contextFit + trial.judge.onThesis) / 3).toFixed(1)} turn=${trial.turnMs}ms`))),
-    ),
-  { concurrency })
+  const trials = yield* runCampaign({
+    name: "social-matrix",
+    cells,
+    concurrency,
+    capMs: () => turnTimeoutMs + 90_000,
+    run: ({ candidate, task, sample }) => runTrial(candidate, task, sample, turnTimeoutMs, judge),
+    failed: ({ candidate, task, sample }, cause) => failedTrial(candidate, task, sample, cause),
+    evidenceDir,
+    trialVersion: "social-trial-v1",
+    trialName: ({ candidate, task, sample }) => trialFileName([candidate.model, candidate.effort, task.id, sample]),
+    describe: ({ candidate, task, sample }) => `${candidate.model} effort=${candidate.effort} fixture=${task.id} sample=${sample}`,
+    summarize: (trial) => `${trial.candidate.model} ${trial.candidate.effort} ${trial.task}: drafted=${trial.drafted} correct=${trial.decisionCorrect} bounces=${trial.gateRejections} link=${trial.selfLink} judge=${trial.judge === null ? "-" : ((trial.judge.substance + trial.judge.contextFit + trial.judge.onThesis) / 3).toFixed(1)} turn=${trial.turnMs}ms`,
+  })
 
   const ranked = candidates
     .map((candidate) => rank(candidate, trials.filter((trial) => trial.candidate.model === candidate.model && trial.candidate.effort === candidate.effort)))
@@ -415,19 +366,13 @@ const program = Effect.gen(function* () {
     fixtures: TASKS.map((task) => ({ id: task.id, expectDraft: task.expectDraft, linkEarned: task.linkEarned })),
     candidates: ranked,
   }
-  yield* persist(output, report)
+  yield* persistJson(output, report)
   console.log("\nrank  model                                   effort  discipline  first-try  link-rate  judge  turn-p50  score")
   ranked.forEach((entry, index) => console.log(`${String(index + 1).padStart(4)}  ${entry.candidate.model.padEnd(38)} ${entry.candidate.effort.padEnd(6)}  ${entry.discipline.toFixed(2)}        ${entry.firstTryPassRate.toFixed(2)}       ${entry.selfLinkRate.toFixed(2)}       ${entry.judgeScore.toFixed(2)}   ${String(entry.p50TurnMs).padStart(8)}  ${entry.score.toFixed(3)}`))
   console.log(`evidence: ${output}`)
   const allFailed = ranked.every((entry) => entry.score === 0)
-  if (allFailed && process.argv.includes("--strict")) return yield* Effect.fail("every candidate failed the social matrix")
-  return ranked
+  if (allFailed && hasFlag("--strict")) return yield* Effect.fail("every candidate failed the social matrix")
+  return 0
 })
 
-program.pipe(
-  Effect.catchAll((error) => Effect.sync(() => {
-    console.error(`social-matrix failed: ${String(error)}`)
-    process.exitCode = 1
-  })),
-  Effect.runPromise,
-)
+runMatrixMain("socialMatrix.ts", program)
