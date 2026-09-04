@@ -1,6 +1,6 @@
-import { mkdirSync, writeFileSync } from "node:fs"
 import { homedir } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
+import { argValue, fileStamp, persistJson, positiveInt, runMatrixMain } from "../framework/campaign.js"
 import { LanguageModel, Prompt, Toolkit } from "@effect/ai"
 import { HttpClientRequest } from "@effect/platform"
 import { Cause, Duration, Effect, Either, Option, Redacted, Ref, Stream } from "effect"
@@ -62,26 +62,6 @@ interface EffortSample {
   readonly reasoningTokens: number | null
 }
 
-const argValue = (name: string): Option.Option<string> => {
-  const at = process.argv.indexOf(name)
-  return Option.fromNullable(at < 0 ? undefined : process.argv[at + 1])
-}
-
-const positiveInt = (name: string, fallback: number): number => Option.match(argValue(name), {
-  onNone: () => fallback,
-  onSome: (value) => {
-    const parsed = Math.floor(Number(value))
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
-  },
-})
-
-const persist = (path: string, value: unknown): Effect.Effect<void, Error> => Effect.try({
-  try: () => {
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8")
-  },
-  catch: (cause) => new Error(`failed to persist the probe report: ${String(cause)}`),
-})
 
 const authStack = LocalAuthStoreLive(process.cwd(), homedir())
 
@@ -291,12 +271,12 @@ const program = Effect.gen(function* () {
   const samples = positiveInt("--samples", 2)
   const out = Option.getOrElse(
     argValue("--out"),
-    () => join(process.cwd(), ".efferent", "evals", `ui-latency-probe-${new Date().toISOString().replace(/[:.]/g, "-")}.json`),
+    () => join(process.cwd(), ".efferent", "evals", `ui-latency-probe-${fileStamp()}.json`),
   )
   console.log(`ui-latency-probe: model=${model} probe=${probe} samples=${samples}`)
   const parts = probe === "parts" || probe === "all" ? yield* probeParts(model, samples) : null
   const efforts = probe === "effort" || probe === "all" ? yield* probeEfforts(model, samples) : null
-  yield* persist(out, {
+  yield* persistJson(out, {
     version: "ui-latency-probe-v1",
     generatedAt: new Date().toISOString(),
     model,
@@ -307,9 +287,4 @@ const program = Effect.gen(function* () {
   return 0
 })
 
-if (process.argv[1]?.endsWith("latencyProbe.ts") === true) {
-  process.exit(await Effect.runPromise(program.pipe(Effect.catchAll((error) => Effect.sync(() => {
-    console.error(String(error))
-    return 1
-  })))))
-}
+runMatrixMain("latencyProbe.ts", program)

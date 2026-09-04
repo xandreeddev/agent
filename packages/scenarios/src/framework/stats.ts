@@ -15,3 +15,20 @@ export const wilsonInterval = (
     denominator
   return { low: Math.max(0, center - margin), high: Math.min(1, center + margin) }
 }
+
+/** The q-th percentile by nearest-rank; `+Infinity` for an empty sample so a
+ *  candidate with no measurements never looks fast. */
+export const percentile = (values: ReadonlyArray<number>, q: number): number => {
+  if (values.length === 0) return Number.POSITIVE_INFINITY
+  const ordered = [...values].sort((a, b) => a - b)
+  return ordered[Math.min(ordered.length - 1, Math.max(0, Math.ceil(q * ordered.length) - 1))]!
+}
+
+export const mean = (values: ReadonlyArray<number>): number =>
+  values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length
+
+/** Population standard deviation; 0 below two samples. */
+export const standardDeviation = (values: ReadonlyArray<number>): number => {
+  const average = mean(values)
+  return values.length < 2 ? 0 : Math.sqrt(mean(values.map((value) => (value - average) ** 2)))
+}

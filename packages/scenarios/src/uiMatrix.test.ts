@@ -1,7 +1,8 @@
 import { describe, expect, test } from "bun:test"
 import { Effect, Option } from "effect"
 import { landingReference } from "@xandreed/ui-agent"
-import { cappedTrial, containTrialFailure, deriveStageMetrics, scoreInformationArchitecture, scoreRequestRelevance, serverReceiveMs } from "./uiMatrix.js"
+import { cappedTrial, containTrialFailure } from "./framework/campaign.js"
+import { deriveStageMetrics, failedTrial, scoreInformationArchitecture, scoreRequestRelevance, serverReceiveMs } from "./uiMatrix.js"
 
 describe("the UI matrix deterministic scorers", () => {
   test("localized and inflected copy satisfies semantic concept aliases", () => {
@@ -25,7 +26,7 @@ describe("the UI matrix deterministic scorers", () => {
     const trials = await Effect.runPromise(Effect.forEach([
       Effect.fail(new Error("provider rejected the request")),
       Effect.die(new Error("SQLite disk I/O error")),
-    ], (failure, index) => containTrialFailure(candidate, task, index + 1, failure), { concurrency: 2 }))
+    ], (failure, index) => containTrialFailure((cause) => failedTrial(candidate, task, index + 1, cause), failure), { concurrency: 2 }))
 
     expect(trials).toHaveLength(2)
     expect(trials.every((trial) => !trial.complete && trial.failures.length === 1)).toBe(true)
@@ -64,7 +65,7 @@ describe("the UI matrix deterministic scorers", () => {
     // timeout hangs here because interruption waits for the finalizer.
     const wedged = Effect.never.pipe(Effect.ensuring(Effect.never)) as Effect.Effect<never, unknown>
     const startedAt = Date.now()
-    const trial = await Effect.runPromise(containTrialFailure(candidate, task, 1, cappedTrial(150, wedged)))
+    const trial = await Effect.runPromise(containTrialFailure((cause) => failedTrial(candidate, task, 1, cause), cappedTrial(150, wedged)))
 
     expect(Date.now() - startedAt).toBeLessThan(5_000)
     expect(trial.complete).toBe(false)

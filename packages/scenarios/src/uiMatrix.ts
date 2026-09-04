@@ -7,11 +7,12 @@ import type { CanvasSession } from "@xandreed/canvas"
 import { LanguageModelSelectionLive, LocalAuthStoreLive, SqliteConversationStoreLive } from "@xandreed/providers"
 import { UI_AGENT_RECIPE_SET_VERSION, UI_AGENT_SCHEMA_VERSION, UI_COMPOSER_PROMPT_VERSION, UI_PLANNER_PROMPT_VERSION, UI_REPAIR_PROMPT_VERSION, UiAgentExecutionProfile, UiAgentModels, UiComponentCatalog, UiHost, UiPageStore, foldPageEvents, validateBlocks, validateManifest, validatePageCompleteness } from "@xandreed/ui-agent"
 import type { UiAgentEvent, UiAgentProfileType, UiGenerationProtocolType, UiPage } from "@xandreed/ui-agent"
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs"
 import { homedir, tmpdir } from "node:os"
-import { dirname, join } from "node:path"
+import { join } from "node:path"
 import { chromium } from "playwright"
-import { wilsonInterval } from "./framework/stats.js"
+import { argValue, csv, fileStamp, grid, persistJson, positiveInt, runCampaign, runMatrixMain } from "./framework/campaign.js"
+import { mean, percentile, standardDeviation, wilsonInterval } from "./framework/stats.js"
 import { makeUiPageQualityJudge } from "./judges/uiPageQuality.js"
 import { generalTierCall, preflightAuth } from "./live/llm.js"
 
@@ -144,37 +145,6 @@ const TASKS: ReadonlyArray<MatrixTask> = [
   { id: "integration-guide", archetype: "document", screening: false, prompt: "Build an API integration guide covering authentication, the first request, typed responses, error handling, rate limits, and production readiness.", concepts: [["authentication", "auth"], ["request"], ["response"], ["error"], ["rate limit"]] },
   { id: "migration-adr", archetype: "document", screening: false, prompt: "Build an architecture decision document for migrating a promise-based service to Effect with ports and adapters, Layers, concurrency, rollout stages, and trade-offs.", concepts: [["effect"], ["port"], ["layer"], ["concurr"], ["rollout", "trade-off"]] },
 ]
-
-const argValue = (name: string): Option.Option<string> => {
-  const at = process.argv.indexOf(name)
-  return Option.fromNullable(at < 0 ? undefined : process.argv[at + 1])
-}
-
-const csv = (name: string, fallback: ReadonlyArray<string>): ReadonlyArray<string> => Option.match(argValue(name), {
-  onNone: () => fallback,
-  onSome: (value) => value.split(",").map((entry) => entry.trim()).filter(Boolean),
-})
-
-const positiveInt = (name: string, fallback: number): number => Option.match(argValue(name), {
-  onNone: () => fallback,
-  onSome: (value) => {
-    const parsed = Math.floor(Number(value))
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
-  },
-})
-
-const percentile = (values: ReadonlyArray<number>, q: number): number => {
-  if (values.length === 0) return Number.POSITIVE_INFINITY
-  const ordered = [...values].sort((a, b) => a - b)
-  return ordered[Math.min(ordered.length - 1, Math.max(0, Math.ceil(q * ordered.length) - 1))]!
-}
-
-const mean = (values: ReadonlyArray<number>): number => values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length
-
-const standardDeviation = (values: ReadonlyArray<number>): number => {
-  const average = mean(values)
-  return values.length < 2 ? 0 : Math.sqrt(mean(values.map((value) => (value - average) ** 2)))
-}
 
 const normalizedText = (value: string): string => value.normalize("NFKD").replaceAll(/[\u0300-\u036f]/g, "").toLowerCase()
 
@@ -573,7 +543,7 @@ const runTrial = (candidate: Candidate, task: MatrixTask, sample: number, budget
     cleanupTrialWorkspace,
   )
 
-const failedTrial = (candidate: Candidate, task: MatrixTask, sample: number, error: unknown): Trial => {
+export const failedTrial = (candidate: Candidate, task: MatrixTask, sample: number, error: unknown): Trial => {
   const failure = toAgentFailure(error, "ui-matrix")
   return {
     candidate,
@@ -606,27 +576,6 @@ const failedTrial = (candidate: Candidate, task: MatrixTask, sample: number, err
     page: null,
   }
 }
-
-/** Disconnect + hard wall-clock cap: a trial whose cleanup wedges (dead
- * Chromium, stuck server drain) is abandoned in the BACKGROUND and the wave
- * moves on — interruption blocked inside finalizers cannot stall the
- * campaign. The 2026-07-13 v8 run froze for hours on exactly this. */
-export const cappedTrial = (capMs: number, trial: Effect.Effect<Trial, unknown>): Effect.Effect<Trial, unknown> => trial.pipe(
-  Effect.disconnect,
-  Effect.timeoutFail({
-    duration: Duration.millis(capMs),
-    onTimeout: () => `trial exceeded the ${capMs}ms hard wall-clock cap; its runtime was abandoned in the background`,
-  }),
-)
-
-export const containTrialFailure = (
-  candidate: Candidate,
-  task: MatrixTask,
-  sample: number,
-  trial: Effect.Effect<Trial, unknown>,
-): Effect.Effect<Trial> => trial.pipe(
-  Effect.catchAllCause((cause) => Effect.succeed(failedTrial(candidate, task, sample, Cause.pretty(cause)))),
-)
 
 const rank = (candidate: Candidate, trials: ReadonlyArray<Trial>): RankedCandidate => {
   const refinementSuccesses = trials.filter((trial) => trial.acceptedRefinements > 0 && trial.complete && trial.designSystemScore === 1 && trial.informationArchitectureScore === 1 && trial.relevance >= 0.6).length
@@ -669,23 +618,6 @@ const judgeCandidate = (
   )
 }
 
-const persist = (path: string, value: unknown): Effect.Effect<void, Error> => Effect.try({
-  try: () => {
-    mkdirSync(dirname(path), { recursive: true })
-    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, "utf8")
-  },
-  catch: (cause) => new Error(`failed to persist UI matrix: ${String(cause)}`),
-})
-
-const persistTrial = (evidenceDir: string, candidate: Candidate, task: MatrixTask, sample: number, trial: Trial): Effect.Effect<void> =>
-  persist(join(evidenceDir, "trials", `${evidenceName(candidate, task, sample)}.json`), {
-    version: "ui-agent-trial-v2",
-    recordedAt: new Date().toISOString(),
-    trial,
-  }).pipe(
-    Effect.catchAll((error) => Effect.logWarning(String(error))),
-  )
-
 const program = Effect.gen(function* () {
   const keyed = yield* preflightAuth(process.cwd())
   if (!keyed) return yield* Effect.fail("no model credential; run Smith :login first")
@@ -707,17 +639,23 @@ const program = Effect.gen(function* () {
   const trialTimeoutMs = positiveInt("--trial-timeout-ms", plannerTimeoutMs + composerTimeoutMs + 15_000)
   const composerWorkers = positiveInt("--composer-workers", 1)
   const budgets = { plannerTimeoutMs, composerTimeoutMs, trialTimeoutMs, composerWorkers }
-  const output = Option.getOrElse(argValue("--output"), () => join(process.cwd(), ".efferent", "evals", `ui-agent-matrix-${new Date().toISOString().replace(/[:.]/g, "-")}.json`))
+  const output = Option.getOrElse(argValue("--output"), () => join(process.cwd(), ".efferent", "evals", `ui-agent-matrix-${fileStamp()}.json`))
   const evidenceDir = output.replace(/\.json$/i, "-screenshots")
-  const combinations = candidates.flatMap((candidate) => tasks.flatMap((task) => Array.from({ length: samples }, (_, sample) => ({ candidate, task, sample: sample + 1 }))))
-  console.log(`ui-matrix: ${candidates.length} candidates × ${tasks.length} tasks × ${samples} sample(s) = ${combinations.length} trials · concurrency=${concurrency} · profiling budgets=${plannerTimeoutMs}/${composerTimeoutMs}/${trialTimeoutMs}ms`)
-  const trials = yield* Effect.forEach(combinations, ({ candidate, task, sample }) =>
-    Effect.logInfo(`ui-matrix ${candidate.model} effort=${candidate.effort} protocol=${candidate.protocol} task=${task.id} sample=${sample}`).pipe(
-      Effect.zipRight(containTrialFailure(candidate, task, sample, cappedTrial(budgets.trialTimeoutMs + 60_000, runTrial(candidate, task, sample, budgets, evidenceDir)))),
-      Effect.tap((trial) => persistTrial(evidenceDir, candidate, task, sample, trial)),
-      Effect.tap((trial) => Effect.sync(() => console.log(`  ${candidate.model} ${candidate.effort} ${candidate.protocol} ${task.id}: delta=${trial.firstContentDeltaMs}ms browser=${trial.browserFirstVisibleMs}ms accepted=${trial.firstVisibleMs}ms complete=${trial.initialCompleteMs}ms first-patch=${trial.firstRefinementMs ?? "none"} components=${trial.componentCount} overflow=${trial.desktopOverflow}/${trial.mobileOverflow} ds=${trial.designSystemScore.toFixed(2)} ia=${trial.informationArchitectureScore.toFixed(2)} relevance=${trial.relevance.toFixed(2)} stages=${trial.stageMetrics.map((metric) => `${metric.stage}:${metric.wallMs}ms/${metric.outputTokens}tok`).join(" ") || "none"}`))),
-    ),
-  { concurrency })
+  const cells = grid(candidates, tasks, samples)
+  console.log(`ui-matrix: ${candidates.length} candidates × ${tasks.length} tasks × ${samples} sample(s) = ${cells.length} trials · concurrency=${concurrency} · profiling budgets=${plannerTimeoutMs}/${composerTimeoutMs}/${trialTimeoutMs}ms`)
+  const trials = yield* runCampaign({
+    name: "ui-matrix",
+    cells,
+    concurrency,
+    capMs: () => budgets.trialTimeoutMs + 60_000,
+    run: ({ candidate, task, sample }) => runTrial(candidate, task, sample, budgets, evidenceDir),
+    failed: ({ candidate, task, sample }, cause) => failedTrial(candidate, task, sample, cause),
+    evidenceDir,
+    trialVersion: "ui-agent-trial-v2",
+    trialName: ({ candidate, task, sample }) => evidenceName(candidate, task, sample),
+    describe: ({ candidate, task, sample }) => `${candidate.model} effort=${candidate.effort} protocol=${candidate.protocol} task=${task.id} sample=${sample}`,
+    summarize: (trial) => `${trial.candidate.model} ${trial.candidate.effort} ${trial.candidate.protocol} ${trial.task}: delta=${trial.firstContentDeltaMs}ms browser=${trial.browserFirstVisibleMs}ms accepted=${trial.firstVisibleMs}ms complete=${trial.initialCompleteMs}ms first-patch=${trial.firstRefinementMs ?? "none"} components=${trial.componentCount} overflow=${trial.desktopOverflow}/${trial.mobileOverflow} ds=${trial.designSystemScore.toFixed(2)} ia=${trial.informationArchitectureScore.toFixed(2)} relevance=${trial.relevance.toFixed(2)} stages=${trial.stageMetrics.map((metric) => `${metric.stage}:${metric.wallMs}ms/${metric.outputTokens}tok`).join(" ") || "none"}`,
+  })
   const ranked = candidates.map((candidate) => rank(candidate, trials.filter((trial) => trial.candidate.model === candidate.model && trial.candidate.effort === candidate.effort && trial.candidate.protocol === candidate.protocol))).sort((a, b) => b.deterministicScore - a.deterministicScore)
   const judgeModel = argValue("--judge-model")
   const judgeCall = yield* Option.match(judgeModel, {
@@ -737,13 +675,11 @@ const program = Effect.gen(function* () {
   const judged = ranked.map((candidate) => judgedByCandidate.get(`${candidate.candidate.model}:${candidate.candidate.effort}:${candidate.candidate.protocol}`) ?? candidate)
   const final = judged.sort((a, b) => b.selectionScore - a.selectionScore)
   const report = { version: "ui-agent-matrix-v6", generatedAt: new Date().toISOString(), executionPath: process.argv.includes("--session-only") ? "internal-session" : "canvas-browser", evidenceDir, trialEvidenceDir: join(evidenceDir, "trials"), targets: { firstContentP50Ms: 750, firstContentP95Ms: 1500, meaningfulUiP50Ms: 3000, meaningfulUiP95Ms: 5000, completeP50Ms: 12000, completeP95Ms: 20000 }, judgeModel: Option.getOrElse(judgeModel, () => "configured-general"), formula: "eligibility uses accepted complete output, design-system compliance, information architecture and relevance; latency confidence is browser first meaningful UI <=5s; finalist selection = .70*deterministic + .30*fixed-judge quality", tasks, candidates: final }
-  yield* persist(output, report)
+  yield* persistJson(output, report)
   console.log("\nrank  model/protocol                                   effort  success  <=5s   first-p50 first-p95 done-p95 DS    IA    rel   cons  judge  score")
   final.forEach((entry, index) => console.log(`${String(index + 1).padStart(4)}  ${`${entry.candidate.model}/${entry.candidate.protocol}`.padEnd(48)} ${entry.candidate.effort.padEnd(6)}  ${String(entry.refinementSuccesses).padStart(2)}/${String(entry.trials.length).padEnd(2)}    ${String(entry.withinFiveSeconds).padStart(2)}/${String(entry.trials.length).padEnd(2)}  ${String(entry.p50FirstVisibleMs).padStart(9)} ${String(entry.p95FirstVisibleMs).padStart(9)} ${String(entry.p95EnrichmentMs).padStart(8)} ${entry.meanDesignSystemScore.toFixed(2)}  ${entry.meanInformationArchitectureScore.toFixed(2)}  ${entry.meanRelevance.toFixed(2)}  ${entry.repeatConsistency.toFixed(2)}  ${(entry.judgeScore?.toFixed(2) ?? "-").padStart(5)}  ${entry.selectionScore.toFixed(3)}`))
   console.log(`evidence: ${output}`)
   return process.argv.includes("--strict") && !final.some((candidate) => candidate.refinementSuccesses > 0) ? 1 : 0
 })
 
-if (process.argv[1]?.endsWith("uiMatrix.ts") === true) {
-  process.exit(await Effect.runPromise(program))
-}
+runMatrixMain("uiMatrix.ts", program)
