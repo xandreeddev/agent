@@ -53,7 +53,7 @@ GENERAL, the forge implementor runs on CODE (`runForgeSession` scopes the
 implementor's LanguageModel through providers' `roleModelView("code")` —
 `codeModel ?? model`), and one-shot helpers run on FAST (`UtilityLlm`).
 
-## Layout (boundaries: smith → sdk-core + sdk-adapters + foundry, never cli)
+## Layout (boundaries: smith → engine + providers + foundry)
 
 ```
 src/
@@ -68,10 +68,19 @@ src/
 │                      toForgeSpec (SpecDoc → foundry Spec — the ONLY foundry mapping;
 │                      gateRequestFromSpec: flags > frontmatter > discovery; trivialSpecDoc
 │                      for the shorthand)
-├── refine/            session (one persisted conversation with the sdk-core refiner; the
-│                      draft FILE is the truth, re-read after every turn; ONE handler
-│                      record shared by the real agent layer and the scripted test seam) ·
-│                      headless (-p: one unattended draft on stdout, --yes locks)
+├── refine/            session (one persisted conversation with the refiner; the draft
+│                      FILE is the truth, re-read after every turn; ONE handler record
+│                      shared by the real agent layer and the scripted test seam; an
+│                      opened slug IS the draft; the context set's pins ride each turn
+│                      once-on-change) · headless (-p: one unattended draft on stdout,
+│                      --yes locks)
+├── context/           the CONTEXT SET (.efferent/context.json): entity + functions (pin
+│                      grammar: file · dir/ · glob · note: · spec: · run: · diff[:ref] ·
+│                      cmd:) · store · standing (rules · lessons · memory · quality bar,
+│                      GOVERNED by the set — off is None everywhere) · assemble (bounded,
+│                      per-block status, shell pins only when a turn asks) · inject (the
+│                      once-on-change seam for refine + follow-up; the forge brief takes
+│                      the bundle whole)
 ├── implementor/       efferentImplementor (EfferentImplementorLive: Layer.scoped capturing
 │                      the service Context so Implementor stays R=never; ONE conversation
 │                      per forge run — retries continue it with the gate brief; receipt.ref
@@ -90,17 +99,21 @@ src/
 └── tui/               THREE modes on one chassis (runtime: withTuiChassis — scoped
                        renderer + pump + exit Deferred; runTui / runTuiRefine /
                        runTuiWorkspace). Workspace = the persistent session: idle
-                       dashboard (specs · runs · lessons) ⇄ refine ⇄ forge, exit only
-                       by :quit. theme (single token set; no hex/glyph outside it) ·
-                       presentation/{conversation,floor,refine,workspace,selectBox,promptBox,
-                       loginFlow,modelCatalog} (pure machines, fold-tested) · state/
-                       (signals + the ONE overlay: select picker | login flow) ·
-                       view/ui/{atoms,BottomMenu,PromptBody} (the MenuRow discipline:
-                       one row shape for every menu) · actions/{model,login} (drivers;
-                       anthropic OAuth = PKCE + loopback server RACING a pasted
-                       redirect, state===verifier CSRF) · login/oauthServer · commands
-                       (:quit/:new/:lock/:forge [slug]/:model [code|fast]/:login/
-                       :logout) · keys (ONE Esc rule: overlay → forge → composer)
+                       dashboard (specs · runs · sessions · context · lessons — a MENU:
+                       Tab focuses a row, ↑/↓ move, ⏎ opens its verbs, :open lists all)
+                       ⇄ refine ⇄ forge, exit only by :quit. theme (single token set;
+                       no hex/glyph outside it) · presentation/{conversation,floor,refine,
+                       workspace,dashboard,contextView,selectBox,promptBox,loginFlow,
+                       modelCatalog} (pure machines, fold-tested) · state/ (signals +
+                       the ONE overlay: select picker | login flow) · view/ui/{atoms,
+                       BottomMenu,PromptBody} (the MenuRow discipline: one row shape for
+                       every menu) · actions/{model,login,settings,dashboard,context}
+                       (drivers; anthropic OAuth = PKCE + loopback server RACING a
+                       pasted redirect, state===verifier CSRF) · login/oauthServer ·
+                       commands (:quit/:new/:open/:context …/:lock/:forge [slug]/:ship/
+                       :model [code|fast]/:settings/:resume/:branch/:fold/:login/:logout)
+                       · keys (ONE Esc rule keyed on what RUNS: overlay → dashboard
+                       cursor → a busy turn or live forge → composer)
 ```
 
 ## Rules
