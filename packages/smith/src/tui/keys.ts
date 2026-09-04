@@ -410,7 +410,10 @@ export const dispatch = (ctx: SmithTuiContext, key: Key): void => {
     const forgeLive =
       ctx.store.mode() === "forge" &&
       (phase === "boot" || phase === "implementing" || phase === "gating")
-    if (ctx.store.busy() || forgeLive) {
+    // The workspace session answers from its ONE state value; the
+    // single-purpose bodies still derive it from the view.
+    const running = ctx.isRunning?.() ?? (ctx.store.busy() || forgeLive)
+    if (running) {
       ctx.store.setNotice("interrupting the run… (:quit to leave)")
       ctx.interrupt()
       return

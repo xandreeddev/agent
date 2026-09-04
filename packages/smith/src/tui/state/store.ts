@@ -245,6 +245,9 @@ export interface SmithTuiContext {
   readonly run: <A, E>(effect: Effect.Effect<A, E, SmithUiServices>) => Promise<A>
   /** Interrupt the running forge session (Esc). */
   readonly interrupt: () => void
+  /** Something is RUNNING (a turn, or the forge) — what Esc interrupts. The
+   *  workspace session answers from its one state value. */
+  readonly isRunning?: () => boolean
   /** End the TUI with an exit code (`:quit`, Ctrl-C). */
   readonly exit: (code: number) => void
   /** Refine mode: one composer submission = one refiner turn. */
