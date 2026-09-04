@@ -159,7 +159,7 @@ export const runAgent = <Tools extends Record<string, Tool.Any>, R = never>(
           Effect.catchAll(() => Effect.succeed(Option.none<CompactionPlan>())),
         )
 
-    return yield* runLoop({
+    const result = yield* runLoop({
       system: config.system,
       messages,
       toolkit: config.toolkit,
@@ -177,6 +177,14 @@ export const runAgent = <Tools extends Record<string, Tool.Any>, R = never>(
       // prefill hits fire.
       Effect.locally(CurrentPromptCacheKey, Option.some(config.promptCacheKey ?? String(conversationId))),
     )
+    // How the run ended goes beside the trail — bookkeeping, so a store that
+    // refuses the row is a warning, never a failed run.
+    yield* store.recordOutcome(conversationId, result.outcome, result.reason).pipe(
+      Effect.catchAll((error) =>
+        Effect.logWarning(`the run's outcome was not recorded: ${error.message}`),
+      ),
+    )
+    return result
   }).pipe(
     Effect.withSpan("agent.run", {
       attributes: {

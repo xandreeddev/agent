@@ -16,6 +16,7 @@ const memoryStore = Effect.gen(function* () {
   const fold = yield* Ref.make(Option.none<Checkpoint>())
   // Every write as the store saw it — `appendAll` batches are one entry.
   const writes = yield* Ref.make<ReadonlyArray<ReadonlyArray<AgentMessage>>>([])
+  const outcomes = yield* Ref.make<ReadonlyArray<string>>([])
   return {
     layer: Layer.succeed(ConversationStore, {
       create: () => Effect.succeed(cid),
@@ -67,12 +68,16 @@ const memoryStore = Effect.gen(function* () {
         ),
       latestCheckpoint: () => Ref.get(fold),
       setTitle: () => Effect.void,
+      recordOutcome: (_id, outcome, reason) =>
+        Ref.update(outcomes, (all) => [...all, `${outcome}:${reason}`]),
+      latestOutcome: () => Effect.succeed(Option.none()),
       listByWorkspace: () => Effect.succeed([]),
       fork: () => Effect.succeed(cid),
     prune: () => Effect.succeed(0),
     }),
     rows,
     writes,
+    outcomes,
   }
 })
 
@@ -416,6 +421,8 @@ describe("runAgent — persistence that survives an interrupt", () => {
             Ref.set(fold, Option.some(new Checkpoint({ conversationId: cid, messagePosition, summary, createdAt: 0 }))),
           latestCheckpoint: () => Ref.get(fold),
           setTitle: () => Effect.void,
+          recordOutcome: () => Effect.void,
+          latestOutcome: () => Effect.succeed(Option.none()),
           listByWorkspace: () => Effect.succeed([]),
           fork: () => Effect.succeed(cid),
           prune: () => Effect.succeed(0),
@@ -459,6 +466,35 @@ describe("runAgent — persistence that survives an interrupt", () => {
         // position, one row past the truth.
         const checkpoint = Option.getOrThrow(yield* Ref.get(fold))
         expect(checkpoint.messagePosition).toBe(1)
+      }),
+    )
+  })
+})
+
+describe("runAgent — the outcome goes beside the trail", () => {
+  test("a completed run records ok/completed; a capped run records partial/step-cap", async () => {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const store = yield* memoryStore
+        yield* runAgent({ system: "sys", toolkit: emptyKit }, cid, "hello").pipe(
+          Effect.provide(emptyHandlers),
+          Effect.provideServiceEffect(LanguageModel.LanguageModel, textModel("world")),
+          Effect.provide(store.layer),
+        )
+        const alwaysTools = LanguageModel.make({
+          generateText: () =>
+            Effect.succeed([
+              { type: "tool-call", id: "c", name: "noop", params: { value: "x" } },
+              { type: "finish", reason: "tool-calls", usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 } },
+            ] as never),
+          streamText: () => Stream.die("not scripted") as never,
+        })
+        yield* runAgent({ system: "sys", toolkit: emptyKit, maxSteps: 2 }, cid, "loop").pipe(
+          Effect.provide(emptyHandlers),
+          Effect.provideServiceEffect(LanguageModel.LanguageModel, alwaysTools),
+          Effect.provide(store.layer),
+        )
+        expect(yield* Ref.get(store.outcomes)).toEqual(["ok:completed", "partial:step-cap"])
       }),
     )
   })

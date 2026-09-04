@@ -7,6 +7,17 @@ export class StoreError extends Schema.TaggedError<StoreError>()("StoreError", {
   message: Schema.String,
 }) {}
 
+/** How a run ENDED — persisted beside the trail so the database alone says
+ *  whether the last run completed on its own or was stopped by the step cap
+ *  or the degenerate-loop breaker (the loop's `agent_end` was in-memory only). */
+export class RunOutcomeRecord extends Schema.Class<RunOutcomeRecord>("RunOutcomeRecord")({
+  conversationId: ConversationId,
+  /** Epoch millis. */
+  at: Schema.Number,
+  outcome: Schema.Literal("ok", "partial"),
+  reason: Schema.Literal("completed", "step-cap", "degenerate-loop"),
+}) {}
+
 export class ConversationSummary extends Schema.Class<ConversationSummary>(
   "ConversationSummary",
 )({
@@ -14,6 +25,14 @@ export class ConversationSummary extends Schema.Class<ConversationSummary>(
   createdAt: Schema.Number,
   firstPrompt: Schema.optionalWith(Schema.String, { as: "Option" }),
   title: Schema.optionalWith(Schema.String, { as: "Option" }),
+  /** The latest recorded run outcome, when a run has finished in it. */
+  lastOutcome: Schema.optionalWith(
+    Schema.Struct({
+      outcome: Schema.Literal("ok", "partial"),
+      reason: Schema.Literal("completed", "step-cap", "degenerate-loop"),
+    }),
+    { as: "Option" },
+  ),
 }) {}
 
 /** A persisted row WITH its durable position — what the active window is
@@ -76,6 +95,15 @@ export class ConversationStore extends Context.Tag("@xandreed/engine/Conversatio
       id: ConversationId,
       title: string,
     ) => Effect.Effect<void, StoreError>
+    /** Record how a run ended (appended; the latest is the conversation's). */
+    readonly recordOutcome: (
+      id: ConversationId,
+      outcome: RunOutcomeRecord["outcome"],
+      reason: RunOutcomeRecord["reason"],
+    ) => Effect.Effect<void, StoreError>
+    readonly latestOutcome: (
+      id: ConversationId,
+    ) => Effect.Effect<Option.Option<RunOutcomeRecord>, StoreError>
     readonly listByWorkspace: (
       workspaceDir: string,
     ) => Effect.Effect<ReadonlyArray<ConversationSummary>, StoreError>

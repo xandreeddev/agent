@@ -19,7 +19,7 @@ const view: WorkspaceView = {
   runs: [{ id: "22222222-2222-4222-8222-222222222222", text: "✓ accepted (attempt 1) · stats", accepted: true }],
   lessons: ["never call the same tool twice with the same args"],
   providers: [],
-  sessions: [{ id: "33333333-3333-4333-8333-333333333333", label: "stats session", ageMinutes: 5 }],
+  sessions: [{ id: "33333333-3333-4333-8333-333333333333", label: "stats session", ageMinutes: 5, outcome: Option.none() }],
   unconfigured: false,
 }
 

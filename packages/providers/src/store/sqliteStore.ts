@@ -8,6 +8,7 @@ import {
   ConversationId,
   ConversationStore,
   ConversationSummary,
+  RunOutcomeRecord,
   StoredMessage,
   StoreError,
 } from "@xandreed/engine"
@@ -54,6 +55,16 @@ const MIGRATIONS: ReadonlyArray<string> = [
     ON checkpoints (conversation_id, message_position);
   CREATE INDEX IF NOT EXISTS conversations_by_workspace
     ON conversations (workspace_dir);
+  `,
+  `
+  CREATE TABLE IF NOT EXISTS run_outcomes (
+    conversation_id TEXT NOT NULL,
+    at INTEGER NOT NULL,
+    outcome TEXT NOT NULL,
+    reason TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS run_outcomes_by_conversation
+    ON run_outcomes (conversation_id, at);
   `,
 ]
 
@@ -249,6 +260,36 @@ export const SqliteConversationStoreLive = (dbPath: string) =>
             db.query(`UPDATE conversations SET title = ? WHERE id = ?`).run(title, id)
           }),
 
+        recordOutcome: (id: ConversationId, outcome, reason) =>
+          tryDb(() => {
+            db.query(
+              `INSERT INTO run_outcomes (conversation_id, at, outcome, reason) VALUES (?, ?, ?, ?)`,
+            ).run(id, Date.now(), outcome, reason)
+          }),
+
+        latestOutcome: (id: ConversationId) =>
+          tryDb(() =>
+            Option.fromNullable(
+              db
+                .query(
+                  `SELECT at, outcome, reason FROM run_outcomes
+                   WHERE conversation_id = ? ORDER BY at DESC, rowid DESC LIMIT 1`,
+                )
+                .get(id) as { at: number; outcome: string; reason: string } | null,
+            ),
+          ).pipe(
+            Effect.flatMap((row) =>
+              Option.match(row, {
+                onNone: () => Effect.succeed(Option.none<RunOutcomeRecord>()),
+                onSome: (r) =>
+                  Schema.decodeUnknown(RunOutcomeRecord)({ conversationId: id, ...r }).pipe(
+                    Effect.map(Option.some),
+                    Effect.mapError((issue) => new StoreError({ message: String(issue) })),
+                  ),
+              }),
+            ),
+          ),
+
         prune: (beforeEpochMs: number) =>
           tryDb(() => {
             const removed = db.transaction(() => {
@@ -326,7 +367,13 @@ export const SqliteConversationStoreLive = (dbPath: string) =>
                   `SELECT c.id, c.created_at, c.title,
                           (SELECT m.content FROM messages m
                            WHERE m.conversation_id = c.id ORDER BY m.position ASC LIMIT 1)
-                            AS first_content
+                            AS first_content,
+                          (SELECT o.outcome FROM run_outcomes o
+                           WHERE o.conversation_id = c.id ORDER BY o.at DESC, o.rowid DESC LIMIT 1)
+                            AS last_outcome,
+                          (SELECT o.reason FROM run_outcomes o
+                           WHERE o.conversation_id = c.id ORDER BY o.at DESC, o.rowid DESC LIMIT 1)
+                            AS last_reason
                    FROM conversations c WHERE c.workspace_dir = ?
                    ORDER BY c.created_at DESC`,
                 )
@@ -335,6 +382,8 @@ export const SqliteConversationStoreLive = (dbPath: string) =>
                 created_at: number
                 title: string | null
                 first_content: string | null
+                last_outcome: string | null
+                last_reason: string | null
               }>
             ).map((row) => {
               const first = Option.fromNullable(row.first_content).pipe(
@@ -345,11 +394,26 @@ export const SqliteConversationStoreLive = (dbPath: string) =>
                     : Option.none<string>(),
                 ),
               )
+              // The outcome columns decode through the summary's own schema
+              // — an unknown literal (a future outcome kind) reads as none.
+              const lastOutcome = Option.flatMap(
+                Option.all([Option.fromNullable(row.last_outcome), Option.fromNullable(row.last_reason)]),
+                ([outcome, reason]) =>
+                  Either.getRight(
+                    Schema.decodeUnknownEither(
+                      Schema.Struct({
+                        outcome: Schema.Literal("ok", "partial"),
+                        reason: Schema.Literal("completed", "step-cap", "degenerate-loop"),
+                      }),
+                    )({ outcome, reason }),
+                  ),
+              )
               return new ConversationSummary({
                 id: ConversationId.make(row.id),
                 createdAt: row.created_at,
                 firstPrompt: first,
                 title: Option.fromNullable(row.title),
+                lastOutcome,
               })
             }),
           ),

@@ -33,6 +33,8 @@ export interface SessionLine {
   readonly id: string
   readonly label: string
   readonly ageMinutes: number
+  /** How its last run ended — `ok`, or `partial (step-cap)` — when one has. */
+  readonly outcome: Option.Option<string>
 }
 
 export interface WorkspaceView {
@@ -110,6 +112,9 @@ export const sessionLines = (
         56,
       ),
       ageMinutes: Math.max(0, Math.round((now - s.createdAt) / 60_000)),
+      outcome: Option.map(s.lastOutcome, (o) =>
+        o.outcome === "ok" ? "ok" : `partial (${o.reason})`,
+      ),
     }))
 
 export const workspaceView = (
