@@ -487,6 +487,17 @@ export const makeWorkspaceBody = (
           "resume",
           Effect.gen(function* () {
             const cid = ConversationId.make(id)
+            // A turn still running would keep writing into the story we are
+            // about to replace — stop it first; and the finished run's
+            // follow-up target belongs to the OLD session, so the next text
+            // must not land in that coder's conversation.
+            const running = yield* Ref.get(turnFiberRef)
+            yield* Option.match(running, {
+              onNone: () => Effect.void,
+              onSome: (fiber) => Fiber.interrupt(fiber).pipe(Effect.asVoid),
+            })
+            yield* Ref.set(turnFiberRef, Option.none())
+            yield* Ref.set(followUpRef, Option.none())
             const session = yield* makeRefineSession(run.cwd, publish, {
               unattended: false,
               resume: cid,
@@ -496,6 +507,9 @@ export const makeWorkspaceBody = (
             yield* Ref.set(refineRef, Option.some(session))
             yield* Effect.sync(() => {
               store.resetRefine()
+              // The replay rebuilds the WHOLE story — it must not append to
+              // whatever was on screen.
+              store.resetConversation()
               store.setMode("refine")
             })
             const conv = yield* ConversationStore

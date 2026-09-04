@@ -11,11 +11,34 @@ import type { SmithEvent } from "../domain/SmithEvent.js"
  * non-zero exit STOPS the sequence with the stderr in the pane, and nothing
  * here is destructive (no force, no reset, no checkout of existing branches).
  * The workspace's own git identity signs the commit — smith adds no trailers.
+ *
+ * Every step is IDEMPOTENT, so a stopped ship re-runs cleanly once the
+ * environment is fixed: the branch it already checked out is kept, nothing
+ * new to stage reuses the commit it already made, an existing PR is reused.
+ * (Live-caught: a failed push could never be retried — the re-run died on
+ * "nothing to commit" before reaching the push again.)
  */
 
 const SUBJECT_CAP = 72
 const DETAIL_CAP = 300
 const STEP_TIMEOUT_MS = 120_000
+
+/**
+ * The harness's OWN state never rides a ship: the conversation db (+ WAL /
+ * SHM), logs, the memory ledger, the profile draft, the local model
+ * selection, and the run artifacts. Specs DO ship — they are the change's
+ * provenance. (Live-caught: a bare `git add -A` staged smith.db into a PR.)
+ */
+export const HARNESS_STATE_PATHSPECS: ReadonlyArray<string> = [
+  ".efferent/smith.db",
+  ".efferent/smith.db-wal",
+  ".efferent/smith.db-shm",
+  ".efferent/logs",
+  ".efferent/memory",
+  ".efferent/profile-draft",
+  ".efferent/config.json",
+  ".foundry/runs",
+]
 
 export interface ShipPlan {
   readonly cwd: string
@@ -31,8 +54,14 @@ const clip = (text: string, max: number): string =>
 
 const firstLine = (text: string): string => text.split("\n")[0] ?? text
 
+const lastLine = (text: string): string => text.split("\n").at(-1)?.trim() ?? ""
+
 /** POSIX single-quote escaping — the only quoting `bash -c` needs here. */
 const sq = (text: string): string => `'${text.replaceAll("'", "'\\''")}'`
+
+/** The whole tree minus the harness's own state (see {@link HARNESS_STATE_PATHSPECS}). */
+export const stageCommand = (): string =>
+  `git add -A -- . ${HARNESS_STATE_PATHSPECS.map((path) => sq(`:(exclude)${path}`)).join(" ")}`
 
 /** The plan is pure: everything the ship needs, derived from the run's own
  *  artifact (the last attempt's verdicts ARE the green gates). */
@@ -76,35 +105,36 @@ export const runShip = (
   Effect.gen(function* () {
     const shell = yield* Shell
 
+    /** A silent PROBE — a question about the workspace, never a step on the pane. */
+    const probe = (command: string): Effect.Effect<StepResult> =>
+      shell.exec(command, { cwd: plan.cwd, timeoutMs: STEP_TIMEOUT_MS }).pipe(
+        Effect.map((result) => ({
+          ok: result.exitCode === 0,
+          detail:
+            result.exitCode === 0
+              ? result.stdout.trim()
+              : result.stderr.trim().length > 0
+                ? result.stderr.trim()
+                : result.stdout.trim(),
+        })),
+        Effect.catchAll((error) => Effect.succeed({ ok: false, detail: error.message })),
+      )
+
+    const report = (step: string, result: StepResult): Effect.Effect<StepResult> =>
+      publish({
+        type: "ship_step",
+        step,
+        ok: result.ok,
+        detail: clip(result.detail, DETAIL_CAP),
+      }).pipe(Effect.as(result))
+
+    /** A published STEP — its exit code is the verdict. */
     const exec = (step: string, command: string): Effect.Effect<StepResult> =>
-      shell
-        .exec(command, { cwd: plan.cwd, timeoutMs: STEP_TIMEOUT_MS })
-        .pipe(
-          Effect.map((result) => ({
-            ok: result.exitCode === 0,
-            detail:
-              result.exitCode === 0
-                ? result.stdout.trim()
-                : result.stderr.trim().length > 0
-                  ? result.stderr.trim()
-                  : result.stdout.trim(),
-          })),
-          Effect.catchAll((error) => Effect.succeed({ ok: false, detail: error.message })),
-          Effect.tap((result) =>
-            publish({
-              type: "ship_step",
-              step,
-              ok: result.ok,
-              detail: clip(result.detail, DETAIL_CAP),
-            }),
-          ),
-        )
+      probe(command).pipe(Effect.flatMap((result) => report(step, result)))
 
     const head = yield* exec("branch", "git rev-parse --abbrev-ref HEAD")
     if (!head.ok || head.detail.length === 0) return Option.none<string>()
 
-    // On main/master, the work moves to its own branch; a feature branch is
-    // the human's chosen context — ship stays on it.
     const onDefault = head.detail === "main" || head.detail === "master"
     const branch = onDefault ? plan.branch : head.detail
     if (onDefault) {
@@ -112,24 +142,39 @@ export const runShip = (
       if (!created.ok) return Option.none<string>()
     }
 
-    const staged = yield* exec("stage", "git add -A")
+    const staged = yield* exec("stage", stageCommand())
     if (!staged.ok) return Option.none<string>()
 
-    const committed = yield* exec(
-      "commit",
-      `git commit -m ${sq(plan.subject)} -m ${sq(plan.commitBody)}`,
-    )
+    // `git diff --cached --quiet` exits 0 when the index matches HEAD: a
+    // re-run after a failed push has nothing new and reuses the commit it
+    // already made. A probe that cannot run reads as "something pending" —
+    // the commit step then surfaces the real error.
+    const pending = yield* probe("git diff --cached --quiet")
+    const committed = pending.ok
+      ? yield* report("commit", {
+          ok: true,
+          detail: "nothing new to commit — reusing the branch's existing commit",
+        })
+      : yield* exec("commit", `git commit -m ${sq(plan.subject)} -m ${sq(plan.commitBody)}`)
     if (!committed.ok) return Option.none<string>()
 
     const pushed = yield* exec("push", `git push -u origin ${sq(branch)}`)
     if (!pushed.ok) return Option.none<string>()
+
+    // A PR already open for this branch (a re-run after `gh` failed, or the
+    // human opened one by hand) is the deliverable — never a second one.
+    const existing = yield* probe(`gh pr view ${sq(branch)} --json url --jq .url`)
+    const existingUrl = existing.ok ? lastLine(existing.detail) : ""
+    if (existingUrl.startsWith("http")) {
+      yield* report("pr", { ok: true, detail: `existing PR reused: ${existingUrl}` })
+      return Option.some(existingUrl)
+    }
 
     const pr = yield* exec(
       "pr",
       `gh pr create --head ${sq(branch)} --title ${sq(plan.subject)} --body ${sq(plan.prBody)}`,
     )
     if (!pr.ok) return Option.none<string>()
-    // gh prints the PR URL as the last stdout line.
-    const url = pr.detail.split("\n").at(-1)?.trim() ?? ""
+    const url = lastLine(pr.detail)
     return url.length > 0 ? Option.some(url) : Option.none<string>()
   })
