@@ -6,7 +6,7 @@ import { RuleConfig } from "../domain/Rules.js"
 import type { Workspace } from "../ports/Gate.js"
 import { makeIdiomGate } from "./idiomGate.js"
 import { allBuiltinRules } from "./rules/index.js"
-import { TsProjectCachedLive } from "./TsProject.js"
+import { TsProjectCachedLive } from "./TsProject.port.js"
 
 const rootDir = path.resolve(import.meta.dir, "../../fixtures/idioms")
 const ws: Workspace = { rootDir, files: [] }
@@ -95,13 +95,20 @@ describe("effect-idioms gate over fixtures", () => {
     ])
   })
 
-  test("quality/no-skipped-tests flags skip/todo/x-prefixed runners", async () => {
+  test("quality/no-skipped-tests flags skip/todo/x-prefixed runners AND .only", async () => {
     const findings = await findingsFor(["quality/no-skipped-tests"], ["skippedTests.ts"])
     expect(at(findings)).toEqual([
-      { rule: "quality/no-skipped-tests", file: "skippedTests.ts", line: 6 },
       { rule: "quality/no-skipped-tests", file: "skippedTests.ts", line: 7 },
       { rule: "quality/no-skipped-tests", file: "skippedTests.ts", line: 8 },
+      { rule: "quality/no-skipped-tests", file: "skippedTests.ts", line: 9 },
+      { rule: "quality/no-skipped-tests", file: "skippedTests.ts", line: 10 },
     ])
+    expect(findings.map((f) => f.message).at(-1)).toContain("every OTHER test")
+  })
+
+  test("effect/no-as-never flags the never-cast and nothing else", async () => {
+    const findings = await findingsFor(["effect/no-as-never"], ["asNever.ts"])
+    expect(at(findings)).toEqual([{ rule: "effect/no-as-never", file: "asNever.ts", line: 2 }])
   })
 
   test("quality/no-empty-catch flags the swallow, not the handled catch", async () => {

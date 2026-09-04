@@ -32,7 +32,26 @@ const CHECKED = [
   "packages/math/src/**",
   "packages/social/src/**",
   "packages/issue-tracker-example/src/**",
+  // The factory judges itself by the same profile (the dogfood).
+  "packages/foundry/src/**",
 ]
+
+/**
+ * The declared TYPE-ERASURE boundary: the router wrapping arbitrary provider
+ * services, the compat/codex clients speaking @effect/ai's generic surface,
+ * the loop's prompt assembly, the bridge over dynamic MCP tools. `as never`
+ * is the design there and nowhere else — a new one anywhere else fails.
+ * Test scaffolding (scripted providers, stubbed ports) is out of scope.
+ */
+const ERASURE_BOUNDARY = [
+  "packages/providers/src/llm/router.ts",
+  "packages/providers/src/llm/compat.ts",
+  "packages/providers/src/llm/openAiCodex.ts",
+  "packages/providers/src/llm/providers.ts",
+  "packages/engine/src/loop/loop.ts",
+  "packages/engine/src/mcp/bridge.ts",
+]
+const TEST_SCAFFOLDING = ["**/*.test.ts", "**/testing.ts", "packages/scenarios/src/**"]
 
 const config: typeof GateSuiteConfig.Encoded = {
   tsconfig: "tsconfig.json",
@@ -44,6 +63,11 @@ const config: typeof GateSuiteConfig.Encoded = {
     { rule: "effect/no-nullable-return", include: CHECKED },
     { rule: "effect/match-over-tag-switch", include: CHECKED },
     { rule: "effect/no-as-any", include: CHECKED },
+    {
+      rule: "effect/no-as-never",
+      include: CHECKED,
+      exclude: [...ERASURE_BOUNDARY, ...TEST_SCAFFOLDING],
+    },
     { rule: "effect/no-parallel-interface", include: CHECKED },
     { rule: "quality/no-skipped-tests", include: CHECKED },
     { rule: "quality/no-empty-catch", include: CHECKED },

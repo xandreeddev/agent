@@ -7,7 +7,7 @@ import { RuleConfig } from "../domain/Rules.js"
 import type { Workspace } from "../ports/Gate.js"
 import { makeIdiomGate } from "../gates/idiomGate.js"
 import { effectPack, vendoredPackFiles } from "../gates/rules/packs.js"
-import { TsProjectCachedLive } from "../gates/TsProject.js"
+import { TsProjectCachedLive } from "../gates/TsProject.port.js"
 import { gatesFromConfig, loadConfig } from "./check.js"
 
 const REPO_NODE_MODULES = path.resolve(import.meta.dir, "../../../../node_modules")

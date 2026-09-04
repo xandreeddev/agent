@@ -6,6 +6,7 @@ import type { IdiomRule } from "../idiomGate.js"
 import { brandedIdFields } from "./brandedIdFields.js"
 import { matchOverTagSwitch } from "./matchOverTagSwitch.js"
 import { noAsAny } from "./noAsAny.js"
+import { noAsNever } from "./noAsNever.js"
 import { noEmptyCatch } from "./noEmptyCatch.js"
 import { noLet } from "./noLet.js"
 import { noLoopStatements } from "./noLoopStatements.js"
@@ -37,6 +38,7 @@ export const effectPack: RulePack = {
     noNullableReturn,
     matchOverTagSwitch,
     noAsAny,
+    noAsNever,
     brandedIdFields,
     noParallelInterface,
   ],
