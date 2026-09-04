@@ -17,6 +17,7 @@ import { contextWindowOf, fmtCost } from "../presentation/modelCatalog.js"
 import { OverlayView } from "./Overlay.js"
 import { Workspace } from "./Workspace.js"
 import { computePalette } from "../presentation/palette.js"
+import { dashboardRows } from "../presentation/dashboard.js"
 
 const cellColor = (state: GateCell["state"]): string =>
   state === "pass"
@@ -867,6 +868,14 @@ const ComposerFrame = (props: { ctx: SmithTuiContext }) => {
     store.viEnabled() && store.vi().mode === "normal" ? "   -- NORMAL --" : ""
   const rolesLine = () =>
     `${glyph.dot} general ${roles().general}   code ${roles().code}   fast ${roles().fast}${gauge()}${cost()}${viBadge()}`
+  // The idle screen's footer points at the dashboard menu — once there is
+  // something on it to act on.
+  const hint = () =>
+    store.mode() === "idle" && dashboardRows(store.workspace()).length > 0
+      ? Option.isSome(store.dashboardFocus())
+        ? "↑/↓ move · ⏎ act · esc back to the composer"
+        : ": for commands · Tab → the dashboard"
+      : ": for commands · Tab completes"
   return (
     <box flexDirection="column" flexShrink={0} marginTop={1}>
       <Show when={store.notice().length > 0}>
@@ -883,7 +892,7 @@ const ComposerFrame = (props: { ctx: SmithTuiContext }) => {
       <text fg={tokens.text.muted} wrapMode="none" flexShrink={0}>{rule()}</text>
       <box flexDirection="row">
         <text fg={tokens.text.dim} wrapMode="none" flexShrink={0}>
-          {": for commands · Tab completes"}
+          {hint()}
         </text>
         <text flexGrow={1} wrapMode="none">{""}</text>
         <text fg={tokens.text.dim} wrapMode="none" flexShrink={1}>
