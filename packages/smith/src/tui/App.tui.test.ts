@@ -930,10 +930,12 @@ describe("the smith TUI — the dashboard is a menu", () => {
     await waitFrame(tui, (f) => f.includes("follow up freely"), 200)
     await tui.setup.mockInput.typeText(":new")
     tui.setup.mockInput.pressEnter()
-    const dashboard = await waitFrame(tui, (f) => f.includes("forge runs") && !f.includes("follow up freely"), 100)
+    // The run itself is on the dashboard — as a row, where it belongs — and
+    // the dashboard arrives already refreshed (never the previous one).
+    const dashboard = await waitFrame(tui, (f) => f.includes("✓ accepted (attempt 1)"), 200)
+    expect(dashboard).toContain("✓ accepted (attempt 1)")
     expect(dashboard).not.toContain("accepted (attempt 1) · artifact")
     expect(dashboard).not.toContain("persisted in .efferent/smith.db")
-    // The run itself is on the dashboard — as a row, where it belongs.
-    expect(dashboard).toContain("✓ accepted (attempt 1)")
+    expect(dashboard).not.toContain("follow up freely")
   }, 20_000)
 })

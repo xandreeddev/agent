@@ -646,6 +646,10 @@ export const makeWorkspaceBody = (
       const dropRefine = Effect.gen(function* () {
         yield* Ref.set(refineRef, Option.none())
         yield* Ref.set(followUpRef, Option.none())
+        // Re-read the workspace BEFORE the dashboard shows — switching first
+        // flashed the previous dashboard (the run just finished missing from
+        // its own list) for a frame or, on a slow box, several.
+        yield* refreshWorkspace
         yield* Effect.sync(() => {
           store.resetRefine()
           store.resetConversation()
@@ -656,7 +660,6 @@ export const makeWorkspaceBody = (
           store.setNotice("")
           store.setMode("idle")
         })
-        yield* refreshWorkspace
       })
 
       const artifactPath = (id: string): string => join(run.cwd, ".foundry", "runs", `${id}.json`)
