@@ -81,6 +81,14 @@ export const renderEventLines = (event: SmithEvent): Option.Option<string> => {
     )
   }
   if (event.type === "profile_error") return Option.some(`✗ profile: ${event.message}`)
+  if (event.type === "context_assembled") {
+    const sources = event.sources
+      .map((s) => (s.status === "included" || s.status === "clipped" ? `${s.label} ${s.chars}` : `${s.label} ${s.status}`))
+      .join(" · ")
+    return Option.some(
+      `  context ${event.injected ? "→ handed to the model" : "(preview)"}: ${sources} — ${event.totalChars} chars`,
+    )
+  }
   return Match.value(event).pipe(
     Match.when({ type: "refine_start" }, (e) =>
       Option.some(

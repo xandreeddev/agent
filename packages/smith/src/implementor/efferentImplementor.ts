@@ -195,6 +195,9 @@ export interface EfferentImplementorOptions {
   readonly doctrine?: Option.Option<QualityBar>
   /** The curated workspace memory block (memory v2), pre-rendered. */
   readonly memory?: Option.Option<string>
+  /** The human's assembled context set — the pins, rendered once per run
+   *  into the attempt-1 brief (and re-attached after a fold). */
+  readonly context?: Option.Option<string>
   /** MID-TURN steering (the engine's `pendingInput` seam): a human's note
    *  typed while an attempt runs lands at the coder's next step. */
   readonly pendingInput?: () => Effect.Effect<Option.Option<string>>
@@ -303,6 +306,7 @@ export const makeEfferentImplementorLive = (
               doctrine: Option.map(doctrine, (bar) => bar.full),
               lessons: options.lessons ?? Option.none(),
               memory: options.memory ?? Option.none(),
+              context: options.context ?? Option.none(),
             }
 
             // A RETRY over an outgrown trail folds first: the gate rejection

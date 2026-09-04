@@ -211,3 +211,52 @@ describe("makeRefineSession — scripted E2E (no keys, no LLM)", () => {
     expect(result.left.message).toContain("nothing to lock")
   })
 })
+
+describe("makeRefineSession — the context set rides the turn", () => {
+  test("the pins ride ONCE, and again only when the human changes them; the pane records each handoff", async () => {
+    const fs = memoryFs()
+    fs.files.set("/ws/src/x.ts", "export const x = 1\n")
+    const contextJson = (pins: ReadonlyArray<Record<string, unknown>>) =>
+      JSON.stringify({ version: 1, off: [], pins, budgetChars: 24_000 })
+    fs.files.set("/ws/.efferent/context.json", contextJson([{ _tag: "file", path: "src/x.ts" }]))
+    const prompts: string[] = []
+    const events: SmithEvent[] = []
+    const capturing: RefineAgent = (cid, prompt, tools) => {
+      prompts.push(prompt)
+      return scriptedAgent(cid, prompt, tools)
+    }
+    await Effect.gen(function* () {
+      const session = yield* makeRefineSession(
+        CWD,
+        (event) =>
+          Effect.sync(() => {
+            events.push(event)
+          }),
+        { unattended: true, agent: capturing },
+      )
+      yield* session.send("build a widget")
+      yield* session.send("make it smaller")
+      // The human pins a note between turns.
+      yield* Effect.sync(() =>
+        fs.files.set(
+          "/ws/.efferent/context.json",
+          contextJson([{ _tag: "file", path: "src/x.ts" }, { _tag: "note", text: "keep the API stable" }]),
+        ),
+      )
+      yield* session.send("and tests")
+    }).pipe(Effect.provide(Layer.mergeAll(fs.layer, stubServices)), Effect.runPromise)
+
+    expect(prompts).toHaveLength(3)
+    expect(prompts[0]).toContain("## Context selected by the human (1 source")
+    expect(prompts[0]).toContain("### src/x.ts (file)\nexport const x = 1")
+    expect(prompts[0]?.endsWith("build a widget")).toBe(true)
+    // Unchanged set → the turn is just the text.
+    expect(prompts[1]).toBe("make it smaller")
+    // Changed set → the whole block again, with the new pin.
+    expect(prompts[2]).toContain("keep the API stable")
+    expect(prompts[2]).toContain("export const x = 1")
+    const handoffs = events.filter((e) => e.type === "context_assembled")
+    expect(handoffs).toHaveLength(2)
+    expect(handoffs.every((e) => e.type === "context_assembled" && e.injected)).toBe(true)
+  })
+})

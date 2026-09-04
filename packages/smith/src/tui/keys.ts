@@ -38,6 +38,7 @@ import {
   submitRowAction,
 } from "./actions/dashboard.js"
 import { dashboardRows, moveFocus } from "./presentation/dashboard.js"
+import { submitContextBudget, submitContextMenu, submitContextPin } from "./actions/context.js"
 import type { Overlay, SmithTuiContext } from "./state/store.js"
 
 /** The structural slice of OpenTUI's ParsedKey smith cares about. */
@@ -171,6 +172,18 @@ const routeSelectKey = (ctx: SmithTuiContext, overlay: Overlay & { kind: "select
             submitDeleteConfirm(ctx, overlay.purpose.slug, value)
             return
           }
+          if (overlay.purpose.tag === "context") {
+            submitContextMenu(ctx, value)
+            return
+          }
+          if (overlay.purpose.tag === "context-pin") {
+            submitContextPin(ctx, overlay.purpose.index, value)
+            return
+          }
+          if (overlay.purpose.tag === "context-budget") {
+            submitContextBudget(ctx, value)
+            return
+          }
           // logout picker: the value IS the provider id.
           ctx.store.closeOverlay()
           logout(ctx, value)
@@ -257,7 +270,7 @@ export const dispatch = (ctx: SmithTuiContext, key: Key): void => {
   // composer — there, Tab still completes a `:` command.
   if (ctx.store.mode() === "idle" && key.ctrl !== true) {
     const focus = ctx.store.dashboardFocus()
-    const rows = dashboardRows(ctx.store.workspace())
+    const rows = dashboardRows(ctx.store.workspace(), ctx.store.context())
     if (key.name === "tab" && ctx.store.composerText().length === 0) {
       key.preventDefault?.()
       if (rows.length === 0) {

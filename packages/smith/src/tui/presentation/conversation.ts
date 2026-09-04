@@ -232,13 +232,30 @@ const resultBlock = (run: FactoryRun, artifact: string): ConversationBlock =>
 /** The fold, mode-curried. `reduceConversation` below stays the refine-worded
  *  binding — safe as a bare Array.reduce callback, where a positional mode
  *  parameter would collide with reduce's index argument. */
+/** `context → src/x.ts 3.2k · diff deferred (3.2k chars ≈ 0.8k tokens) — handed to the model` */
+const contextLine = (event: SmithEvent & { type: "context_assembled" }): string => {
+  const k = (n: number) => (n >= 1_000 ? `${(n / 1_000).toFixed(1)}k` : `${n}`)
+  const sources = event.sources
+    .map((s) =>
+      s.status === "included" || s.status === "clipped"
+        ? `${s.label} ${k(s.chars)}${s.status === "clipped" ? " (clipped)" : ""}`
+        : `${s.label} ${s.status}`,
+    )
+    .join(" · ")
+  return `context → ${sources} (${k(event.totalChars)} chars ≈ ${k(Math.ceil(event.totalChars / 4))} tokens) — ${event.injected ? "handed to the model" : "preview; the next turn carries it"}`
+}
+
 export const reduceConversationIn = (
   mode: "profile" | "refine" | "forge",
 ) => (
   state: ConversationState,
   event: SmithEvent,
 ): ConversationState =>
-  Match.value(event).pipe(
+  // Hoisted: the Match chain below sits at TS's inference depth (see
+  // floor.ts / eventLines.ts — new events hoist rather than add an arm).
+  event.type === "context_assembled"
+    ? push(state, { kind: "notice", text: contextLine(event) })
+    : Match.value(event).pipe(
     Match.when({ type: "agent" }, (e) =>
       Match.value(e.event).pipe(
         // A new turn seals any orphaned live blocks from the previous one

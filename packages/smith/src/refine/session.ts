@@ -2,8 +2,9 @@ import type { LanguageModel } from "@effect/ai"
 import { Effect, Option, Ref } from "effect"
 import { ConfigError } from "@xandreed/foundry"
 import { ConversationStore, FileSystem, runAgent, SpecSlug } from "@xandreed/engine"
-import { loadForgeLessons, loadWorkspaceRules } from "../forge/session.js"
-import { loadQualityBar } from "../gates/profile.js"
+import { makeContextInjector, withContextBlock } from "../context/inject.js"
+import { loadStandingSources } from "../context/standing.js"
+import { loadContextSet } from "../context/store.js"
 import type { AgentMessage, ConversationId, Shell, SpecDoc } from "@xandreed/engine"
 import { expandFileRefs } from "./fileRefs.js"
 import {
@@ -150,15 +151,18 @@ export const makeRefineSession = (
     })
     const refinerLayer = specRefinerToolkit.toLayer(handlers)
     const tools: RefineTools = { propose: handlers.propose_spec }
-    const lessons = yield* loadForgeLessons(cwd)
-    const rules = yield* loadWorkspaceRules(cwd)
-    const doctrine = yield* loadQualityBar(cwd)
+    // The standing sources, GOVERNED by the workspace's context set (a
+    // source switched off is None here too); the pins ride the turns
+    // through the injector — once, and again when the human changes them.
+    const contextSet = yield* loadContextSet(cwd)
+    const standing = yield* loadStandingSources(cwd, contextSet)
+    const injector = yield* makeContextInjector(cwd, publish)
     const skillsBlock = renderSkillsBlock(yield* discoverSkills(cwd))
     const config = specRefinerAgentConfig(cwd, {
       unattended: options.unattended,
-      lessons,
-      rules,
-      doctrine: Option.map(doctrine, (bar) => bar.full),
+      lessons: standing.lessons,
+      rules: standing.rules,
+      doctrine: Option.map(standing.doctrine, (bar) => bar.full),
       skills: skillsBlock.length > 0 ? Option.some(skillsBlock) : Option.none(),
     })
 
@@ -209,7 +213,9 @@ export const makeRefineSession = (
           yield* expanded.notes.length > 0
             ? publish({ type: "file_refs", notes: expanded.notes })
             : Effect.void
-          yield* agent(conversationId, expanded.text, tools)
+          // The context set's pins, when they changed since the last turn.
+          const block = yield* injector.next.pipe(Effect.provide(context))
+          yield* agent(conversationId, withContextBlock(block, expanded.text), tools)
           const draft = yield* readDraft
           yield* Option.match(draft, {
             onNone: () => Effect.void,

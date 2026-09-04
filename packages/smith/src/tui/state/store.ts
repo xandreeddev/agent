@@ -28,6 +28,9 @@ import { emptyWorkspace } from "../presentation/workspace.js"
 import type { LoginFlow } from "../presentation/loginFlow.js"
 import type { SelectState } from "../presentation/selectBox.js"
 import type { DashboardRow } from "../presentation/dashboard.js"
+import type { ContextView } from "../presentation/contextView.js"
+import { emptyContextView } from "../presentation/contextView.js"
+import type { StandingSource } from "../../context/context-set.entity.js"
 
 export interface RolesReadout {
   readonly general: string
@@ -56,6 +59,12 @@ export type SelectPurpose =
   | { readonly tag: "row-actions"; readonly row: DashboardRow }
   /** The one destructive verb asks first. */
   | { readonly tag: "confirm-delete-spec"; readonly slug: string }
+  /** `:context` — standing sources (⏎ toggles), pins (⏎ verbs), actions. */
+  | { readonly tag: "context" }
+  /** One pin's verbs (switch off/on · remove). */
+  | { readonly tag: "context-pin"; readonly index: number }
+  /** The pins' budget presets. */
+  | { readonly tag: "context-budget" }
 
 /** ONE inline contextual surface at a time — select picker or the login
  *  flow; while open, the composer unmounts and keys route here. */
@@ -179,6 +188,9 @@ export interface SmithStore {
    *  mode change. */
   readonly dashboardFocus: Accessor<Option.Option<number>>
   readonly setDashboardFocus: (focus: Option.Option<number>) => void
+  /** The context set as the panel shows it — sources and their sizes. */
+  readonly context: Accessor<ContextView>
+  readonly setContext: (view: ContextView) => void
   /** Fresh floor for the NEXT forge run (a persistent session runs many). */
   readonly resetFloor: (task: string, maxAttempts: number) => void
   /** Fresh refine state for the NEXT idea. */
@@ -202,10 +214,32 @@ export interface DashboardActions {
   readonly followUpRun: (id: string) => void
 }
 
+/** What `:context` can do — the workspace's context set, persisted to
+ *  `.efferent/context.json`; every verb re-measures the panel. */
+export interface ContextActions {
+  /** `:context add <ref>` — the pin grammar (file · dir/ · glob · note: ·
+   *  spec: · run: · diff[:ref] · cmd:). */
+  readonly add: (ref: string) => void
+  /** `:context drop <n|ref>` */
+  readonly drop: (token: string) => void
+  /** Flip a standing source. */
+  readonly toggle: (name: StandingSource) => void
+  readonly set: (name: StandingSource, on: boolean) => void
+  /** `:context on|off <n|ref>` for a pin. */
+  readonly setPin: (token: string, on: boolean) => void
+  /** `:context show` — assemble now (shell pins included) and put the
+   *  readout in the pane. */
+  readonly preview: () => void
+  readonly clear: () => void
+  readonly budget: (chars: number) => void
+}
+
 export interface SmithTuiContext {
   readonly store: SmithStore
   /** The dashboard's verbs (workspace session only). */
   readonly dashboard?: DashboardActions
+  /** The context set's verbs (workspace session only). */
+  readonly context?: ContextActions
   readonly runConfig: SmithRunConfig
   /** UI→Effect bridge (the captured Runtime); actions reach settings/auth/fs/shell. */
   readonly run: <A, E>(effect: Effect.Effect<A, E, SmithUiServices>) => Promise<A>
@@ -272,6 +306,7 @@ export const createSmithStore = (
   const composerSubmit = { current: () => {} }
   const [composerLive, setComposerLive] = createSignal("")
   const [dashboardFocus, setDashboardFocus] = createSignal<Option.Option<number>>(Option.none())
+  const [contextSig, setContextSig] = createSignal<ContextView>(emptyContextView)
   const apply = (event: SmithEvent): void => {
     setLastEventAt(Date.now())
     // The COST fold: every finished turn's usage priced at its model (the
@@ -403,6 +438,8 @@ export const createSmithStore = (
     setWorkspace: (view) => setWorkspaceSig(view),
     dashboardFocus,
     setDashboardFocus,
+    context: contextSig,
+    setContext: (view) => setContextSig(view),
     resetFloor: (task, maxAttempts) => setFloor(initialFloor(task, maxAttempts)),
     resetRefine: () => setRefine(initialRefine),
     resetProfile: () => setProfile(initialProfile),

@@ -6,6 +6,7 @@ import { logout, openLoginFlow } from "./actions/login.js"
 import { openModelPicker, submitModel } from "./actions/model.js"
 import { openSettingsMenu } from "./actions/settings.js"
 import { openDashboardMenu } from "./actions/dashboard.js"
+import { runContextCommand } from "./actions/context.js"
 import type { SmithTuiContext } from "./state/store.js"
 
 /**
@@ -29,6 +30,9 @@ export const runTuiCommand = (ctx: SmithTuiContext, raw: string): void => {
     }),
     Match.when("open", () => {
       openDashboardMenu(ctx)
+    }),
+    Match.when("context", () => {
+      runContextCommand(ctx, words.slice(1))
     }),
     Match.when("new", () => {
       if (ctx.newSpec === undefined) {
@@ -132,7 +136,7 @@ export const runTuiCommand = (ctx: SmithTuiContext, raw: string): void => {
     }),
     Match.orElse(() => {
       ctx.store.setNotice(
-        `unknown command: :${typed} (:quit · :new · :open · :lock · :forge [slug] · :ship · :model [code|fast] · :settings · :resume · :login · :logout)`,
+        `unknown command: :${typed} (:quit · :new · :open · :context · :lock · :forge [slug] · :ship · :model [code|fast] · :settings · :resume · :login · :logout)`,
       )
     }),
   )

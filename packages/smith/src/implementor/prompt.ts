@@ -63,6 +63,9 @@ export interface BriefExtras {
   readonly doctrine?: Option.Option<string>
   readonly lessons?: Option.Option<string>
   readonly memory?: Option.Option<string>
+  /** The human's assembled context set (`.efferent/context.json` pins) —
+   *  reference material, rendered after the standing blocks. */
+  readonly context?: Option.Option<string>
 }
 
 const extrasBlocks = (extras: BriefExtras): ReadonlyArray<string> => [
@@ -70,6 +73,7 @@ const extrasBlocks = (extras: BriefExtras): ReadonlyArray<string> => [
   ...Option.toArray(extras.doctrine ?? Option.none()),
   ...Option.toArray(extras.lessons ?? Option.none()),
   ...Option.toArray(extras.memory ?? Option.none()),
+  ...Option.toArray(extras.context ?? Option.none()),
 ]
 
 /** The attempt-1 brief: the full SpecDoc when the run is spec-driven, plus

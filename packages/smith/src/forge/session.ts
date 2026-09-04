@@ -35,9 +35,11 @@ import type { SmithEvent } from "../domain/SmithEvent.js"
 import { makeEfferentImplementorLive } from "../implementor/efferentImplementor.js"
 import type { ImplementorServices } from "../implementor/efferentImplementor.js"
 import { curateWorkspaceMemory } from "../memory/curate.js"
-import { loadWorkspaceMemory } from "../memory/inject.js"
+import { assembleContext } from "../context/assemble.js"
+import { contextAssembledEvent } from "../context/inject.js"
+import { loadStandingSources } from "../context/standing.js"
+import { loadContextSet } from "../context/store.js"
 import { makeSmithJudgeGate } from "../gates/judge.js"
-import { loadQualityBar } from "../gates/profile.js"
 import { discoverGateSuite, probeAccepts } from "../gates/suite.js"
 import { gateRequestFromSpec, toForgeSpec } from "../spec/toForgeSpec.js"
 
@@ -222,13 +224,19 @@ export const runForgeSession = (
   ImplementorServices | FileSystem | SettingsStore | AuthStore
 > =>
   Effect.gen(function* () {
-    const lessons = yield* loadForgeLessons(run.cwd)
-    const rules = yield* loadWorkspaceRules(run.cwd)
-    const memory = yield* loadWorkspaceMemory(run.cwd)
-    // The ARMED quality bar, once per session: full+compact to the coder's
-    // briefs, the judge form to the judge — every stage works to the same
-    // contract the gates enforce.
-    const doctrine = yield* loadQualityBar(run.cwd, gateRequestFromSpec(run, doc).configPath)
+    // The standing sources (rules · lessons · memory · the ARMED quality
+    // bar, full+compact to the coder's briefs, the judge form to the judge),
+    // GOVERNED by the workspace's context set — and the pins, assembled
+    // ONCE per run into the attempt-1 brief: a run is one unit of work, and
+    // what the human selected is on record in the pane before it starts.
+    const contextSet = yield* loadContextSet(run.cwd)
+    const { rules, lessons, memory, doctrine } = yield* loadStandingSources(
+      run.cwd,
+      contextSet,
+      gateRequestFromSpec(run, doc).configPath,
+    )
+    const bundle = yield* assembleContext(run.cwd, contextSet, { execute: true })
+    yield* contextSet.pins.length > 0 ? publish(contextAssembledEvent(bundle, true)) : Effect.void
 
     // The JUDGE (default ON; spec opts out): a one-shot GENERAL-tier call,
     // deliberately distinct from the CODE-role implementor so the model
@@ -266,6 +274,7 @@ export const runForgeSession = (
         rules,
         doctrine,
         memory,
+        context: bundle.text,
         armedConfigPath: gateRequestFromSpec(run, doc).configPath,
         ...(pendingInput !== undefined ? { pendingInput } : {}),
       }).pipe(

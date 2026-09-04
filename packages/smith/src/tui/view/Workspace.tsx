@@ -2,6 +2,7 @@ import { For, Show } from "solid-js"
 import { Option } from "effect"
 import { BRAND, glyph, tokens } from "../theme.js"
 import { Logo } from "./ui/Logo.js"
+import { contextHeadline, pinLine, standingLine } from "../presentation/contextView.js"
 import type { SmithTuiContext } from "../state/store.js"
 
 /**
@@ -88,12 +89,16 @@ const Onboarding = (props: { ctx: SmithTuiContext }) => {
 
 export const Workspace = (props: { ctx: SmithTuiContext }) => {
   const view = props.ctx.store.workspace
+  const context = props.ctx.store.context
   const focus = props.ctx.store.dashboardFocus
-  // The flat row order the cursor walks: specs · runs · sessions · lessons
-  // (see presentation/dashboard.ts — the same order, the same rows).
+  // The flat row order the cursor walks: specs · runs · sessions · context
+  // (standing, then pins) · lessons (see presentation/dashboard.ts — the
+  // same order, the same rows).
   const runBase = () => view().specs.length
   const sessionBase = () => runBase() + view().runs.length
-  const lessonBase = () => sessionBase() + view().sessions.length
+  const standingBase = () => sessionBase() + view().sessions.length
+  const pinBase = () => standingBase() + context().standing.length
+  const lessonBase = () => pinBase() + context().pins.length
   const total = () => lessonBase() + view().lessons.length
   const focusedAt = (index: number) => Option.exists(focus(), (at) => at === index)
   return (
@@ -104,7 +109,7 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
         </box>
         <ProviderStrip ctx={props.ctx} />
         <Show when={total() > 0}>
-          <text fg={tokens.text.dim} wrapMode="none">
+          <text fg={tokens.text.dim} wrapMode="none" flexShrink={0}>
             {Option.isSome(focus())
               ? "↑/↓ move · ⏎ act on the row · esc back to the composer"
               : "Tab focuses a row · ⏎ acts on it · :open lists everything"}
@@ -200,6 +205,52 @@ export const Workspace = (props: { ctx: SmithTuiContext }) => {
           </box>
 
           <box flexDirection="column" width={56} flexShrink={0} marginLeft={2}>
+            <SectionHead accent={BRAND.verdigris} label="context — what the model sees (:context)" />
+            <text fg={tokens.text.dim} wrapMode="none" flexShrink={0}>{`  ${contextHeadline(context())}`}</text>
+            <For each={context().standing}>
+              {(line, index) => (
+                <box flexDirection="row">
+                  <Cursor on={focusedAt(standingBase() + index())} />
+                  <text
+                    fg={
+                      focusedAt(standingBase() + index())
+                        ? tokens.text.bright
+                        : line.on
+                          ? tokens.text.default
+                          : tokens.text.dim
+                    }
+                    wrapMode="none"
+                  >
+                    {`${line.on ? glyph.pass : glyph.skip} ${standingLine(line)}`}
+                  </text>
+                </box>
+              )}
+            </For>
+            <For each={context().pins}>
+              {(line, index) => (
+                <box flexDirection="row">
+                  <Cursor on={focusedAt(pinBase() + index())} />
+                  <text
+                    fg={
+                      focusedAt(pinBase() + index())
+                        ? tokens.text.bright
+                        : line.on
+                          ? tokens.text.default
+                          : tokens.text.dim
+                    }
+                    wrapMode="none"
+                  >
+                    {`${line.on ? glyph.bullet : glyph.skip} ${pinLine(line)}`}
+                  </text>
+                </box>
+              )}
+            </For>
+            <Show when={context().pins.length === 0}>
+              <text fg={tokens.state.pending} wrapMode="none" flexShrink={0}>
+                {"  no pins — :context add <path | dir/ | glob | note: … | diff | cmd: …>"}
+              </text>
+            </Show>
+
             <SectionHead accent={tokens.accent.input} label="lessons (fed to the next refine + forge)" />
             <Show
               when={view().lessons.length > 0}

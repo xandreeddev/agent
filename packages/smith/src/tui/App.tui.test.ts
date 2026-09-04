@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { Database } from "bun:sqlite"
-import { existsSync, readFileSync } from "node:fs"
+import { existsSync, readFileSync, writeFileSync } from "node:fs"
 import { join } from "node:path"
 import { Effect, Option, Schema } from "effect"
 import { FactoryRun, makeScriptedImplementor } from "@xandreed/foundry"
@@ -937,5 +937,121 @@ describe("the smith TUI — the dashboard is a menu", () => {
     expect(dashboard).not.toContain("accepted (attempt 1) · artifact")
     expect(dashboard).not.toContain("persisted in .efferent/smith.db")
     expect(dashboard).not.toContain("follow up freely")
+  }, 20_000)
+})
+
+describe("the smith TUI — the context set (:context)", () => {
+  test(":context add pins a file with its size; the menu lists it; drop removes it", async () => {
+    const tui = await boot()
+    writeFileSync(join(tui.cwd, "notes.md"), "# notes\nkeep the API stable\n")
+    await waitFrame(tui, (f) => f.includes("no pins"))
+    await tui.setup.mockInput.typeText(":context add notes.md")
+    tui.setup.mockInput.pressEnter()
+    const pinned = await waitFrame(tui, (f) => f.includes("notes.md 28"), 100)
+    expect(pinned).toContain("pinned notes.md")
+    expect(pinned).toContain("rules file")
+    expect(pinned).toContain("quality bar")
+    await tui.setup.mockInput.typeText(":context")
+    tui.setup.mockInput.pressEnter()
+    const menu = await waitFrame(tui, (f) => f.includes("context — what the model sees"))
+    expect(menu).toContain("notes.md 28")
+    expect(menu).toContain("preview")
+    expect(menu).toContain("budget")
+    await settle()
+    tui.setup.mockInput.pressEscape()
+    await waitFrame(tui, (f) => !f.includes("context — what the model sees"))
+    await tui.setup.mockInput.typeText(":context drop 1")
+    tui.setup.mockInput.pressEnter()
+    const dropped = await waitFrame(tui, (f) => f.includes("dropped notes.md"), 100)
+    expect(dropped).toContain("no pins")
+  }, 20_000)
+
+  test(":context off/on switches a standing source and the dashboard says so", async () => {
+    const tui = await boot()
+    await waitFrame(tui, (f) => f.includes("forge lessons"))
+    await tui.setup.mockInput.typeText(":context off lessons")
+    tui.setup.mockInput.pressEnter()
+    const off = await waitFrame(tui, (f) => f.includes("forge lessons off"), 100)
+    expect(off).toContain("forge lessons off")
+    await tui.setup.mockInput.typeText(":context on lessons")
+    tui.setup.mockInput.pressEnter()
+    const on = await waitFrame(tui, (f) => !f.includes("forge lessons off"), 100)
+    expect(on).not.toContain("forge lessons off")
+  }, 20_000)
+
+  test("a refine turn carries the pins once; the pane records the handoff; a later pin rides the next turn", async () => {
+    const prompts: string[] = []
+    const proposing = proposingRefineAgent({
+      goal: "Create out.txt containing done.",
+      acceptance: ["out.txt exists"],
+      checks: [{ name: "out-exists", command: "test -f out.txt" }],
+    })
+    const tui = await boot({
+      seams: {
+        refineAgent: (cid, prompt, tools) => {
+          prompts.push(prompt)
+          return proposing(cid, prompt, tools)
+        },
+      },
+    })
+    writeFileSync(join(tui.cwd, "notes.md"), "keep the API stable\n")
+    await waitFrame(tui, (f) => f.includes("no pins"))
+    await tui.setup.mockInput.typeText(":context add notes.md")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("pinned notes.md"), 100)
+    await tui.setup.mockInput.typeText("make an out file")
+    tui.setup.mockInput.pressEnter()
+    const turn = await waitFrame(tui, (f) => f.includes("context → notes.md"), 200)
+    expect(turn).toContain("handed to the model")
+    expect(prompts[0]).toContain("## Context selected by the human")
+    expect(prompts[0]).toContain("keep the API stable")
+    await tui.setup.mockInput.typeText("shorter")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, () => prompts.length === 2, 200)
+    expect(prompts[1]).toBe("shorter")
+    await tui.setup.mockInput.typeText(":context add note: no new deps")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("pinned note: no new deps"), 100)
+    await tui.setup.mockInput.typeText("and tests")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, () => prompts.length === 3, 200)
+    expect(prompts[2]).toContain("no new deps")
+    expect(prompts[2]).toContain("keep the API stable")
+  }, 20_000)
+
+  test(":context show previews without a turn; the dashboard cursor reaches a pin's verbs", async () => {
+    const tui = await boot()
+    writeFileSync(join(tui.cwd, "notes.md"), "hi\n")
+    await waitFrame(tui, (f) => f.includes("no pins"))
+    await tui.setup.mockInput.typeText(":context add notes.md")
+    tui.setup.mockInput.pressEnter()
+    await waitFrame(tui, (f) => f.includes("pinned notes.md"), 100)
+    await tui.setup.mockInput.typeText(":context show")
+    tui.setup.mockInput.pressEnter()
+    const preview = await waitFrame(tui, (f) => f.includes("context preview: notes.md 3"), 100)
+    expect(preview).toContain("context preview")
+    // No specs, runs, or sessions: the four standing rows come first, the pin fifth.
+    tui.setup.mockInput.pressTab()
+    await waitFrame(tui, (f) => f.includes("> ✓ rules file"))
+    await settle()
+    tui.setup.mockInput.pressArrow("down")
+    await settle()
+    tui.setup.mockInput.pressArrow("down")
+    await settle()
+    tui.setup.mockInput.pressArrow("down")
+    await settle()
+    tui.setup.mockInput.pressArrow("down")
+    const onPin = await waitFrame(tui, (f) => f.includes("> · notes.md 3"))
+    expect(onPin).toContain("> · notes.md 3")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    const verbs = await waitFrame(tui, (f) => f.includes("pin — notes.md 3"))
+    expect(verbs).toContain("switch off")
+    expect(verbs).toContain("remove")
+    await tui.setup.mockInput.typeText("remove")
+    await settle()
+    tui.setup.mockInput.pressEnter()
+    const gone = await waitFrame(tui, (f) => f.includes("dropped notes.md"), 100)
+    expect(gone).toContain("no pins")
   }, 20_000)
 })

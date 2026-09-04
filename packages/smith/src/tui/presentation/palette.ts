@@ -17,6 +17,7 @@ export const PALETTE_COMMANDS: ReadonlyArray<PaletteCommand> = [
   { name: "quit", usage: ":quit", desc: "leave the session (Ctrl-C works too)" },
   { name: "new", usage: ":new", desc: "drop the current draft — back to the dashboard" },
   { name: "open", usage: ":open", desc: "act on a spec, run, session, or lesson (Tab focuses the dashboard)" },
+  { name: "context", usage: ":context [add|drop|on|off|show|clear|budget]", desc: "what the model sees — pin files, dirs, globs, notes, diffs, command output" },
   { name: "lock", usage: ":lock", desc: "approve the current profile or spec draft" },
   { name: "forge", usage: ":forge [slug]", desc: "build the locked draft (or a named spec)" },
   { name: "ship", usage: ":ship", desc: "branch, commit, push + PR the last ACCEPTED run" },
@@ -29,7 +30,7 @@ export const PALETTE_COMMANDS: ReadonlyArray<PaletteCommand> = [
   { name: "logout", usage: ":logout [provider]", desc: "remove a provider credential" },
 ]
 
-export const PALETTE_VISIBLE = 13
+export const PALETTE_VISIBLE = 16
 
 /** The rows to show for the current composer text; empty = no palette. */
 export const computePalette = (input: string): ReadonlyArray<PaletteCommand> => {

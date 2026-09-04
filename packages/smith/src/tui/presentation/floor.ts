@@ -116,6 +116,7 @@ export const reduceFloor = (state: FloorState, event: SmithEvent): FloorState =>
     event.type === "bash_progress" ||
     event.type === "file_refs" ||
     event.type === "profile_status" ||
+    event.type === "context_assembled" ||
     event.type === "profile_draft" ||
     event.type === "profile_locked" ||
     event.type === "profile_error"

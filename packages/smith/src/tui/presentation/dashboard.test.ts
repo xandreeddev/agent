@@ -68,3 +68,35 @@ describe("the dashboard as a menu", () => {
     expect(options[2]?.label).toContain("accepted")
   })
 })
+
+describe("the dashboard menu — the context set's rows", () => {
+  test("standing sources and pins sit between sessions and lessons, with toggle/remove verbs", () => {
+    const rows = dashboardRows(view, {
+      standing: [
+        { name: "rules", on: true, chars: 2_100 },
+        { name: "lessons", on: false, chars: 300 },
+      ],
+      pins: [{ index: 0, label: "src/x.ts", kind: "file", on: true, status: "included", chars: 3_200 }],
+      pinChars: 3_200,
+      standingChars: 2_100,
+      budgetChars: 24_000,
+    })
+    expect(rows.map((r) => r.kind)).toEqual([
+      "spec",
+      "spec",
+      "run",
+      "session",
+      "context-standing",
+      "context-standing",
+      "context-pin",
+      "lesson",
+    ])
+    expect(rows.map(rowKey).slice(4, 7)).toEqual(["context:rules", "context:lessons", "pin:0"])
+    const verbs = (i: number) => rowActions(rows[i]!).map((o) => `${Option.getOrThrow(o.value)}:${o.label}`)
+    expect(verbs(4)).toEqual(["toggle:switch off"])
+    expect(verbs(5)).toEqual(["toggle:switch on"])
+    expect(verbs(6)).toEqual(["toggle:switch off", "remove:remove"])
+    expect(rowTitle(rows[6]!)).toBe("pin — src/x.ts 3.2k")
+    expect(rowOption(rows[5]!, 5).tag).toBe("context")
+  })
+})

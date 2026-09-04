@@ -118,4 +118,17 @@ export type SmithEvent =
       readonly ok: boolean
       readonly detail: string
     }
+  /** The CONTEXT SET was assembled — `injected` when the block rode a
+   *  turn (refine, follow-up) or the forge brief; a preview otherwise. One
+   *  line per source with its status, so what the model saw is on record. */
+  | {
+      readonly type: "context_assembled"
+      readonly sources: ReadonlyArray<{
+        readonly label: string
+        readonly chars: number
+        readonly status: string
+      }>
+      readonly totalChars: number
+      readonly injected: boolean
+    }
   | { readonly type: "agent"; readonly event: LoopEvent }
