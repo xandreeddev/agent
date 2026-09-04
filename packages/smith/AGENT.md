@@ -113,7 +113,12 @@ src/
                        commands (:quit/:new/:open/:context …/:lock/:forge [slug]/:ship/
                        :model [code|fast]/:settings/:resume/:branch/:fold/:login/:logout)
                        · keys (ONE Esc rule keyed on what RUNS: overlay → dashboard
-                       cursor → a busy turn or live forge → composer)
+                       cursor → a busy turn or live forge → composer) · session/state
+                       (THE workspace session as one value: Idle | Refining | Forging
+                       | Forged — pure transitions, queries for "what is running",
+                       mode as a projection; fibers register themselves as their
+                       first action and withdraw in `ensuring`, so the runtime never
+                       holds a dead handle)
 ```
 
 ## Rules

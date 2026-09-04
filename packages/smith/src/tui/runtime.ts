@@ -1,7 +1,7 @@
 import { createCliRenderer } from "@opentui/core"
 import { render } from "@opentui/solid"
 import { createComponent } from "solid-js"
-import { Deferred, Effect, Either, Fiber, Option, Queue, Ref, Runtime, Schema, Scope } from "effect"
+import { Deferred, Effect, Either, Fiber, Match, Option, Queue, Ref, Runtime, Schema, Scope } from "effect"
 import { assembleContext, bundleSummary, fmtChars } from "../context/assemble.js"
 import type { ContextSet, StandingSource } from "../context/context-set.entity.js"
 import {
@@ -33,6 +33,26 @@ import { eventsFromRun } from "../forge/replayRun.js"
 import type { ShipPlan } from "../forge/ship.js"
 import { makeRefineSession } from "../refine/session.js"
 import type { RefineAgent, RefineSession } from "../refine/session.js"
+import {
+  beginForge,
+  beginRefine,
+  currentSession,
+  dropped,
+  forgeEnded,
+  forgeFiber,
+  forgeStarted,
+  idle,
+  interruptTarget,
+  isRunning,
+  modeOf,
+  replayed,
+  runningTurn,
+  shipPlan,
+  shipped,
+  turnEnded,
+  turnStarted,
+} from "./session/state.js"
+import type { SessionState } from "./session/state.js"
 import { makeProfileSession } from "../profile/session.js"
 import { listSpecs, loadSpecDoc, lockSpecDoc, specPath } from "../spec/store.js"
 import { workspaceView } from "./presentation/workspace.js"
@@ -420,24 +440,32 @@ export const makeWorkspaceBody = (
             ),
           ),
         )
-      const refineRef = yield* Ref.make(Option.none<RefineSession>())
-      const forgeFiberRef = yield* Ref.make(Option.none<Fiber.RuntimeFiber<void>>())
-      const turnFiberRef = yield* Ref.make(Option.none<Fiber.RuntimeFiber<void>>())
-      // The last ACCEPTED run's ship plan — `:ship` consumes it (once).
-      const shipPlanRef = yield* Ref.make(Option.none<ShipPlan>())
-      // The last run's implementor conversation — post-run FOLLOW-UP
-      // continues it (free-form: "test the edges", "run the evals").
-      const followUpRef = yield* Ref.make(Option.none<ConversationId>())
+      // THE session, as one value (tui/session/state.ts). Every "what is
+      // running?" question is a query on it; the TUI's mode is its
+      // projection; fibers register themselves as their first action.
+      const stateRef = yield* Ref.make<SessionState>(idle)
+      const transition = (step: (state: SessionState) => SessionState): Effect.Effect<SessionState> =>
+        Ref.updateAndGet(stateRef, step).pipe(
+          Effect.tap((next) => Effect.sync(() => store.setMode(modeOf(next)))),
+        )
+      const sessionState = Ref.get(stateRef)
+      /** A fiber's first action: register as the running turn. */
+      const registerTurn = Effect.withFiberRuntime<void>((fiber) =>
+        transition(turnStarted(fiber)).pipe(Effect.asVoid),
+      )
+      /** A fiber's `ensuring`: unregister — only its own registration. */
+      const unregisterTurn = Effect.withFiberRuntime<void>((fiber) =>
+        transition(turnEnded(fiber)).pipe(Effect.asVoid),
+      )
 
       /** Stop a running refine/follow-up turn (idempotent) — anything that
        *  REPLACES the story must not race a turn still writing into it. */
       const stopTurn = Effect.gen(function* () {
-        const running = yield* Ref.get(turnFiberRef)
+        const running = runningTurn(yield* sessionState)
         yield* Option.match(running, {
           onNone: () => Effect.void,
           onSome: (fiber) => Fiber.interrupt(fiber).pipe(Effect.asVoid),
         })
-        yield* Ref.set(turnFiberRef, Option.none())
       })
 
       // The dashboard reads: specs (undecodable ones dropped — one hand-edited
@@ -524,6 +552,11 @@ export const makeWorkspaceBody = (
           yield* queued.length > 0 ? turn(session, queued.join("\n\n")) : Effect.void
         }).pipe(Effect.ensuring(Effect.sync(() => store.setBusy(false))))
 
+      /** The turn as a registered fiber: it announces itself first and
+       *  withdraws last, so the session never holds a dead handle. */
+      const registered = <A, E, R>(body: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+        registerTurn.pipe(Effect.zipRight(body), Effect.ensuring(unregisterTurn))
+
       /** `:resume <id>`: rebuild the transcript through the SAME reducer the
        *  live path feeds (replay ≡ live-fold), then continue the conversation. */
       const resumeSession = (id: string): void => {
@@ -536,21 +569,19 @@ export const makeWorkspaceBody = (
             // follow-up target belongs to the OLD session, so the next text
             // must not land in that coder's conversation.
             yield* stopTurn
-            yield* Ref.set(followUpRef, Option.none())
             const session = yield* makeRefineSession(run.cwd, publish, {
               unattended: false,
               resume: cid,
               pendingInput: steerFromQueue(store),
               ...(seams.refineAgent !== undefined ? { agent: seams.refineAgent } : {}),
             })
-            yield* Ref.set(refineRef, Option.some(session))
             yield* Effect.sync(() => {
               store.resetRefine()
               // The replay rebuilds the WHOLE story — it must not append to
               // whatever was on screen.
               store.resetConversation()
-              store.setMode("refine")
             })
+            yield* transition(beginRefine(session))
             const conv = yield* ConversationStore
             const messages = yield* conv.list(cid).pipe(Effect.orElseSucceed(() => []))
             yield* Effect.forEach(messages, (message) => {
@@ -676,8 +707,7 @@ export const makeWorkspaceBody = (
         }).pipe(Effect.catchAllDefect(() => Effect.void))
 
       const dropRefine = Effect.gen(function* () {
-        yield* Ref.set(refineRef, Option.none())
-        yield* Ref.set(followUpRef, Option.none())
+        yield* stopTurn
         // Re-read the workspace BEFORE the dashboard shows — switching first
         // flashed the previous dashboard (the run just finished missing from
         // its own list) for a frame or, on a slow box, several.
@@ -690,8 +720,8 @@ export const makeWorkspaceBody = (
           // as the next run's state (live-caught on the dashboard).
           store.resetFloor("", run.maxAttempts)
           store.setNotice("")
-          store.setMode("idle")
         })
+        yield* transition(dropped)
       })
 
       const artifactPath = (id: string): string => join(run.cwd, ".foundry", "runs", `${id}.json`)
@@ -708,8 +738,7 @@ export const makeWorkspaceBody = (
             return
           }
           const record = found.value
-          const forging = yield* Ref.get(forgeFiberRef)
-          if (Option.isSome(forging) && forging.value.unsafePoll() === null) {
+          if ((yield* sessionState)._tag === "Forging") {
             yield* Effect.sync(() => store.setNotice("a forge is running — wait for it, or Esc first"))
             return
           }
@@ -717,21 +746,22 @@ export const makeWorkspaceBody = (
           yield* Effect.sync(() => {
             store.resetFloor(record.spec.goal, record.spec.limits.maxAttempts)
             store.resetConversation()
-            store.setMode("forge")
           })
-          yield* Effect.forEach(eventsFromRun(record, artifactPath(id)), publish)
           const target = armFollowUp
             ? followUpTarget(record.attempts.map((attempt) => attempt.implementorRef)).pipe(
                 Option.flatMap((cid) => Schema.decodeUnknownOption(ConversationId)(cid)),
               )
             : Option.none<ConversationId>()
-          yield* Ref.set(followUpRef, target)
-          yield* Ref.set(
-            shipPlanRef,
-            armFollowUp && record.outcome._tag === "accepted"
-              ? Option.some(renderShipPlan(run.cwd, Option.none(), record))
-              : Option.none(),
+          yield* transition(
+            replayed({
+              followUp: target,
+              ship:
+                armFollowUp && record.outcome._tag === "accepted"
+                  ? Option.some(renderShipPlan(run.cwd, Option.none(), record))
+                  : Option.none(),
+            }),
           )
+          yield* Effect.forEach(eventsFromRun(record, artifactPath(id)), publish)
           yield* Effect.sync(() =>
             store.setNotice(
               !armFollowUp
@@ -757,19 +787,17 @@ export const makeWorkspaceBody = (
           const doc = yield* specOnFile(slug)
           if (Option.isNone(doc)) return
           yield* stopTurn
-          yield* Ref.set(followUpRef, Option.none())
           const session = yield* makeRefineSession(run.cwd, publish, {
             unattended: false,
             slug: doc.value.slug,
             pendingInput: steerFromQueue(store),
             ...(seams.refineAgent !== undefined ? { agent: seams.refineAgent } : {}),
           })
-          yield* Ref.set(refineRef, Option.some(session))
           yield* Effect.sync(() => {
             store.resetRefine()
             store.resetConversation()
-            store.setMode("refine")
           })
+          yield* transition(beginRefine(session))
           const path = specPath(run.cwd, slug)
           yield* publish(
             doc.value.status === "locked"
@@ -814,7 +842,7 @@ export const makeWorkspaceBody = (
           const fs = yield* FileSystem
           // A refine session open on this spec loses its draft — drop it first.
           const current = yield* Effect.flatMap(
-            Ref.get(refineRef),
+            Effect.map(sessionState, currentSession),
             Option.match({
               onNone: () => Effect.succeed(Option.none<string>()),
               onSome: (session) =>
@@ -833,101 +861,106 @@ export const makeWorkspaceBody = (
         forked(
           "send",
           Effect.gen(function* () {
-            const running = yield* Ref.get(forgeFiberRef)
-            const phase = store.floor().phase
-            // The fiber outlives the VERDICT by a beat (arming, refresh,
-            // ensuring) — the floor phase is the honest "still working"
-            // signal, or text typed right after ✓ ACCEPTED queues forever.
-            if (Option.isSome(running) && phase !== "done" && phase !== "failed") {
-              // Text typed mid-forge STEERS the coder: it lands at the next
-              // loop step through the pendingInput seam (was a refusal).
-              yield* Effect.sync(() => {
+            const queued = (notice: string) =>
+              Effect.sync(() => {
                 store.enqueue(text)
-                store.setNotice("queued — the coder reads it at its next step")
+                store.setNotice(notice)
               })
-              return
-            }
-            if (store.busy()) {
+            const newRefine = Effect.gen(function* () {
+              const created = yield* makeRefineSession(run.cwd, publish, {
+                unattended: false,
+                pendingInput: steerFromQueue(store),
+                ...(seams.refineAgent !== undefined ? { agent: seams.refineAgent } : {}),
+              })
               yield* Effect.sync(() => {
-                store.enqueue(text)
-                store.setNotice("queued — steered in at the next step")
+                store.resetRefine()
+                store.resetConversation()
               })
-              return
-            }
-            // A finished forge floor with an armed follow-up: plain text
-            // CONTINUES the coder's conversation — full run context, full
-            // toolkit, no spec pipeline (the human is directing; they
-            // re-:forge when the next slice deserves the gates).
-            if (store.mode() === "forge") {
-              const target = yield* Ref.get(followUpRef)
-              if (Option.isSome(target)) {
-                const fiber = forked(
-                  "follow-up",
-                  Effect.gen(function* () {
-                    yield* Effect.sync(() => {
-                      store.addUserLine(text)
-                      store.setBusy(true)
-                    })
-                    const block = yield* contextInjector.next
-                    yield* (seams.followUp ?? runFollowUpTurn)(
-                      run,
-                      target.value,
-                      withContextBlock(block, text),
-                      publish,
-                      steerFromQueue(store),
-                    ).pipe(Effect.catchAll((error) =>
-                      publish({ type: "forge_error", message: `follow-up: ${String(error)}` }),
-                    ))
-                    const queued = yield* Effect.sync(() => store.drainQueue())
-                    yield* queued.length > 0
-                      ? Effect.sync(() => sendText(queued.join("\n\n")))
-                      : Effect.void
-                  }).pipe(Effect.ensuring(Effect.sync(() => store.setBusy(false)))),
-                )
-                yield* Ref.set(turnFiberRef, Option.some(fiber))
-                return
-              }
-              // No follow-up target: new text starts the next idea.
-              yield* dropRefine
-            }
-            const existing = yield* Ref.get(refineRef)
-            const fresh = Option.isNone(existing)
-            const session = yield* Option.match(existing, {
-              onSome: (s) => Effect.succeed(s),
-              onNone: () =>
-                Effect.gen(function* () {
-                  const created = yield* makeRefineSession(run.cwd, publish, {
-                    unattended: false,
-                    pendingInput: steerFromQueue(store),
-                    ...(seams.refineAgent !== undefined ? { agent: seams.refineAgent } : {}),
-                  })
-                  yield* Ref.set(refineRef, Option.some(created))
-                  yield* Effect.sync(() => {
-                    store.resetRefine()
-                    store.resetConversation()
-                    store.setMode("refine")
-                  })
-                  yield* publish({ type: "refine_start", idea: Option.some(text) })
-                  return created
-                }),
+              yield* transition(beginRefine(created))
+              yield* publish({ type: "refine_start", idea: Option.some(text) })
+              return created
             })
-            const fiber = forked(
-              "turn",
-              turn(session, text).pipe(
-                // The FAST model names a new session after its first turn —
-                // the dashboard's sessions list shows titles, not truncated
-                // prompts. Failures are silent; the title is a nicety.
-                Effect.zipLeft(
-                  fresh
-                    ? autoTitle(session.conversationId, text).pipe(
-                        Effect.catchAll(() => Effect.void),
+            const refineTurn = (session: RefineSession, fresh: boolean) =>
+              Effect.sync(() => {
+                forked(
+                  "turn",
+                  registered(
+                    turn(session, text).pipe(
+                      // The FAST model names a new session after its first
+                      // turn — the dashboard's sessions list shows titles, not
+                      // truncated prompts. Failures are silent; a nicety.
+                      Effect.zipLeft(
+                        fresh
+                          ? autoTitle(session.conversationId, text).pipe(Effect.catchAll(() => Effect.void))
+                          : Effect.void,
+                      ),
+                    ),
+                  ),
+                )
+              })
+            // A finished forge with an armed follow-up: plain text CONTINUES
+            // the coder's conversation — full run context, full toolkit, no
+            // spec pipeline (the human is directing; they re-:forge when the
+            // next slice deserves the gates).
+            const followUpTurn = (target: ConversationId) =>
+              Effect.sync(() => {
+                forked(
+                  "follow-up",
+                  registered(
+                    Effect.gen(function* () {
+                      yield* Effect.sync(() => {
+                        store.addUserLine(text)
+                        store.setBusy(true)
+                      })
+                      const block = yield* contextInjector.next
+                      yield* (seams.followUp ?? runFollowUpTurn)(
+                        run,
+                        target,
+                        withContextBlock(block, text),
+                        publish,
+                        steerFromQueue(store),
+                      ).pipe(
+                        Effect.catchAll((error) =>
+                          publish({ type: "forge_error", message: `follow-up: ${String(error)}` }),
+                        ),
                       )
-                    : Effect.void,
-                ),
-                Effect.ensuring(Ref.set(turnFiberRef, Option.none())),
+                      const pending = yield* Effect.sync(() => store.drainQueue())
+                      yield* pending.length > 0
+                        ? Effect.sync(() => sendText(pending.join("\n\n")))
+                        : Effect.void
+                    }).pipe(Effect.ensuring(Effect.sync(() => store.setBusy(false)))),
+                  ),
+                )
+              })
+            // ONE decision, on the one state value — the old tree re-derived
+            // "what is running" from the forge fiber, the floor's phase, the
+            // busy flag, and the mode, and each pair could disagree.
+            const state = yield* sessionState
+            yield* Match.value(state).pipe(
+              // Text typed mid-forge STEERS the coder: it lands at the next
+              // loop step through the pendingInput seam.
+              Match.tag("Forging", () => queued("queued — the coder reads it at its next step")),
+              Match.tag("Refining", (s) =>
+                Option.isSome(s.turn)
+                  ? queued("queued — steered in at the next step")
+                  : refineTurn(s.session, false),
               ),
+              Match.tag("Forged", (s) =>
+                Option.isSome(s.turn)
+                  ? queued("queued — steered in at the next step")
+                  : Option.match(s.followUp, {
+                      onSome: followUpTurn,
+                      // No follow-up target: new text starts the next idea.
+                      onNone: () =>
+                        dropRefine.pipe(
+                          Effect.zipRight(newRefine),
+                          Effect.flatMap((created) => refineTurn(created, true)),
+                        ),
+                    }),
+              ),
+              Match.tag("Idle", () => newRefine.pipe(Effect.flatMap((created) => refineTurn(created, true)))),
+              Match.exhaustive,
             )
-            yield* Ref.set(turnFiberRef, Option.some(fiber))
           }),
         )
       }
@@ -936,12 +969,8 @@ export const makeWorkspaceBody = (
         forked(
           "forge",
           Effect.gen(function* () {
-            const running = yield* Ref.get(forgeFiberRef)
-            // unsafePoll: only a fiber that hasn't EXITED blocks the next
-            // run — the set-after-fork vs ensuring-clear race can strand a
-            // finished fiber in the ref, and a stale Some must not wedge
-            // every future :forge behind "already running".
-            if (Option.isSome(running) && running.value.unsafePoll() === null) {
+            const state = yield* sessionState
+            if (state._tag === "Forging") {
               yield* Effect.sync(() => store.setNotice("a forge is already running"))
               return
             }
@@ -956,16 +985,14 @@ export const makeWorkspaceBody = (
                   ),
                 ),
               onNone: () =>
-                Effect.flatMap(Ref.get(refineRef), (session) =>
-                  Option.match(session, {
-                    onNone: () =>
-                      Effect.sync(() => {
-                        store.setNotice("nothing to forge — refine a spec first, or :forge <slug>")
-                      }).pipe(Effect.as(Option.none<SpecDoc>())),
-                    onSome: (s) =>
-                      Effect.map(s.currentDraft, (draft) => Option.map(draft, (d) => d.doc)),
-                  }),
-                ),
+                Option.match(currentSession(state), {
+                  onNone: () =>
+                    Effect.sync(() => {
+                      store.setNotice("nothing to forge — refine a spec first, or :forge <slug>")
+                    }).pipe(Effect.as(Option.none<SpecDoc>())),
+                  onSome: (s) =>
+                    Effect.map(s.currentDraft, (draft) => Option.map(draft, (d) => d.doc)),
+                }),
             })
             if (Option.isNone(doc)) return
             if (doc.value.status !== "locked") {
@@ -974,39 +1001,40 @@ export const makeWorkspaceBody = (
               )
               return
             }
+            yield* stopTurn
             yield* Effect.sync(() => {
               store.resetFloor(doc.value.goal, run.maxAttempts)
               store.resetConversation()
-              store.setMode("forge")
             })
+            yield* transition(beginForge(doc.value))
             const forgeRunner = seams.forgeRunner ?? runForgeSession
-            const fiber = Runtime.runFork(rt)(
-              forgeRunner({ ...run, task: doc.value.goal }, publish, doc, steerFromQueue(store)).pipe(
-                // An ACCEPTED run arms `:ship`; anything else disarms it.
-                Effect.tap((result) =>
-                  Ref.set(
-                    shipPlanRef,
-                    result.run.outcome._tag === "accepted"
-                      ? Option.some(renderShipPlan(run.cwd, doc, result.run))
-                      : Option.none(),
-                  ),
+            Runtime.runFork(rt)(
+              // The forge fiber registers itself as its FIRST action and
+              // settles the session in `ensuring` — the parent never holds
+              // a handle that may already be dead (the old stale-Some race).
+              Effect.withFiberRuntime<void>((fiber) =>
+                transition(forgeStarted(fiber)).pipe(Effect.asVoid),
+              ).pipe(
+                Effect.zipRight(
+                  forgeRunner({ ...run, task: doc.value.goal }, publish, doc, steerFromQueue(store)),
                 ),
                 // ANY finished run arms follow-up (a rejected run is the one
-                // you most want to interrogate) — plain text now continues
-                // the coder's conversation instead of starting a new spec.
+                // you most want to interrogate); an ACCEPTED one arms :ship.
                 Effect.tap((result) =>
-                  Ref.set(
-                    followUpRef,
-                    followUpTarget(
-                      result.run.attempts.map((attempt) => attempt.implementorRef),
-                    ).pipe(
-                      // SAFE decode — a malformed ref disarms follow-up, it
-                      // must never kill the finished run's fiber (the brand
-                      // constructor THROWS; live-caught in the battery).
-                      Option.flatMap((id) =>
-                        Schema.decodeUnknownOption(ConversationId)(id),
+                  transition(
+                    forgeEnded({
+                      followUp: followUpTarget(
+                        result.run.attempts.map((attempt) => attempt.implementorRef),
+                      ).pipe(
+                        // SAFE decode — a malformed ref disarms follow-up, it
+                        // must never kill the finished run's fiber.
+                        Option.flatMap((id) => Schema.decodeUnknownOption(ConversationId)(id)),
                       ),
-                    ),
+                      ship:
+                        result.run.outcome._tag === "accepted"
+                          ? Option.some(renderShipPlan(run.cwd, doc, result.run))
+                          : Option.none(),
+                    }),
                   ).pipe(
                     Effect.zipRight(
                       Effect.sync(() => {
@@ -1022,10 +1050,15 @@ export const makeWorkspaceBody = (
                 Effect.tap((code) => Effect.sync(() => store.setExitCode(code))),
                 Effect.zipLeft(refreshWorkspace),
                 Effect.asVoid,
-                Effect.ensuring(Ref.set(forgeFiberRef, Option.none())),
+                // A crashed or interrupted forge still SETTLES the session —
+                // with nothing armed; a settled one is left as it is.
+                Effect.ensuring(
+                  transition(forgeEnded({ followUp: Option.none(), ship: Option.none() })).pipe(
+                    Effect.asVoid,
+                  ),
+                ),
               ),
             )
-            yield* Ref.set(forgeFiberRef, Option.some(fiber))
           }),
         )
       }
@@ -1126,8 +1159,8 @@ export const makeWorkspaceBody = (
         // A live forge fiber and any OAuth loopback server must die BEFORE
         // the renderer restores, or the process outlives the terminal.
         Runtime.runFork(rt)(
-          Effect.forEach([forgeFiberRef, turnFiberRef], (ref) =>
-            Effect.flatMap(Ref.get(ref), (fiber) =>
+          Effect.flatMap(sessionState, (state) =>
+            Effect.forEach([runningTurn(state), forgeFiber(state)], (fiber) =>
               Option.match(fiber, {
                 onNone: () => Effect.void,
                 onSome: (f) => Fiber.interrupt(f).pipe(Effect.asVoid),
@@ -1149,25 +1182,24 @@ export const makeWorkspaceBody = (
         runConfig: run,
         run: (effect) => Runtime.runPromise(rt)(effect),
         interrupt: () => {
-          Runtime.runFork(
-            rt,
-          )(
+          Runtime.runFork(rt)(
             Effect.gen(function* () {
-              const turnFiber = yield* Ref.get(turnFiberRef)
-              if (Option.isSome(turnFiber)) {
-                yield* Fiber.interrupt(turnFiber.value)
-                yield* Effect.sync(() => store.setNotice("turn interrupted"))
-                return
-              }
-              const forgeFiber = yield* Ref.get(forgeFiberRef)
-              yield* Option.match(forgeFiber, {
-                onNone: () =>
-                  Effect.sync(() => store.setNotice("nothing to interrupt")),
-                onSome: (f) => Fiber.interrupt(f).pipe(Effect.asVoid),
+              const target = interruptTarget(yield* sessionState)
+              yield* Option.match(target, {
+                onNone: () => Effect.sync(() => store.setNotice("nothing to interrupt")),
+                onSome: ({ kind, fiber }) =>
+                  Fiber.interrupt(fiber).pipe(
+                    Effect.zipRight(
+                      Effect.sync(() =>
+                        store.setNotice(kind === "turn" ? "turn interrupted" : "forge interrupted"),
+                      ),
+                    ),
+                  ),
               })
             }),
           )
         },
+        isRunning: () => isRunning(Effect.runSync(Ref.get(stateRef))),
         exit: (code) => {
           teardown()
           Runtime.runFork(rt)(Deferred.succeed(exitDeferred, code))
@@ -1177,7 +1209,7 @@ export const makeWorkspaceBody = (
           Runtime.runFork(
             rt,
           )(
-            Effect.flatMap(Ref.get(refineRef), (session) =>
+            Effect.flatMap(Effect.map(sessionState, currentSession), (session) =>
               Option.match(session, {
                 onNone: () =>
                   Effect.sync(() => store.setNotice("no draft to lock — describe an idea first")),
@@ -1223,7 +1255,7 @@ export const makeWorkspaceBody = (
           forked(
             "branch",
             Effect.gen(function* () {
-              const session = yield* Ref.get(refineRef)
+              const session = currentSession(yield* sessionState)
               yield* Option.match(session, {
                 onNone: () =>
                   Effect.sync(() =>
@@ -1246,7 +1278,7 @@ export const makeWorkspaceBody = (
           forked(
             "ship",
             Effect.gen(function* () {
-              const plan = yield* Ref.get(shipPlanRef)
+              const plan = shipPlan(yield* sessionState)
               yield* Option.match(plan, {
                 onNone: () =>
                   Effect.sync(() =>
@@ -1267,7 +1299,7 @@ export const makeWorkspaceBody = (
                     // A successful ship disarms the plan; a failed one stays
                     // armed so a fixed environment can retry with :ship.
                     Effect.tap((url) =>
-                      Option.isSome(url) ? Ref.set(shipPlanRef, Option.none()) : Effect.void,
+                      Option.isSome(url) ? transition(shipped).pipe(Effect.asVoid) : Effect.void,
                     ),
                     Effect.asVoid,
                   ),
