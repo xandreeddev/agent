@@ -30,11 +30,26 @@ while a turn runs are queued **in view** and drained into the next turn.
 History scrolls (wheel / PgUp); a busy heartbeat ticks during long thinking
 turns; Esc interrupts.
 
+The dashboard is a menu: Tab focuses a row (a spec, a forge run, a session,
+a context source, a lesson), ↑/↓ move, ⏎ opens the row's verbs — open, lock,
+forge, or delete a spec; replay a run's report into the floor or follow up
+in the coder's own conversation; resume a session. `:open` lists every row.
+
+`:context` is what the model sees. The standing sources the harness
+discovers (the rules file, forge lessons, workspace memory, the quality bar)
+can be switched off; pins are added on demand — `:context add src/x.ts`, a
+`dir/`, a glob, `note: …`, `spec:<slug>`, `run:<id>`, `diff[:ref]`,
+`cmd: bun test`. Assembly is bounded and readable back: every pin shows as
+included, clipped, skipped over budget, missing, off, or deferred (shell
+pins only run when a turn asks). Refine and follow-up turns carry the block
+once and again only when the set changed; the forge brief takes it whole.
+`:context show` previews; the pane records each handoff.
+
 `:model` picks the general/code/fast roles, `:settings` opens the settings
 menu, `:login` handles keys and the Anthropic OAuth flow, `:resume` replays
 any past session from the persisted trail — reasoning, tools, and spend
 included. After an accepted run, `:ship` branches, commits, pushes, and opens
-the PR.
+the PR; every ship step is idempotent, so a stopped ship re-runs cleanly.
 
 ## The coder's harness
 
