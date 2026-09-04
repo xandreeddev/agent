@@ -4,7 +4,7 @@ import { dirname, join } from "node:path"
 import { describe, expect, test } from "bun:test"
 import { Effect, Layer, Option, Schema } from "effect"
 import { FactoryRun } from "@xandreed/foundry"
-import { ConversationStore, UtilityCompletion, UtilityLlm } from "@xandreed/engine"
+import { ConversationStore, StoredMessage, UtilityCompletion, UtilityLlm } from "@xandreed/engine"
 import type { AgentMessage } from "@xandreed/engine"
 import { LocalFileSystemLive } from "@xandreed/providers"
 import type { SmithEvent } from "../domain/SmithEvent.js"
@@ -148,8 +148,10 @@ const storeWith = (messages: ReadonlyArray<AgentMessage>) =>
   Layer.succeed(ConversationStore, {
     create: () => Effect.die("unused"),
     append: () => Effect.die("unused"),
+    appendAll: () => Effect.die("unused"),
     list: () => Effect.succeed(messages),
-    listActive: () => Effect.succeed(messages),
+    listActive: () =>
+      Effect.succeed(messages.map((message, position) => new StoredMessage({ position, message }))),
     checkpoint: () => Effect.void,
     checkpointAt: () => Effect.void,
     latestCheckpoint: () => Effect.succeed(Option.none()),

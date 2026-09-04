@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs"
+import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import { describe, expect, test } from "bun:test"
@@ -103,5 +103,40 @@ describe("McpClientLive against a canned stdio server", () => {
     expect(result.bad.result).toBe("echo exploded")
     expect(result.unknown._tag).toBe("Left")
     expect(JSON.stringify(result.unknown)).toContain("no such server")
+  })
+})
+
+describe("McpClientLive — one dead server never blocks a live one", () => {
+  test("listTools lists the live server while the unspawnable one fails fast; its slot is freed for a retry", async () => {
+    const cwd = seedWorkspace()
+    const config = JSON.parse(readFileSync(join(cwd, ".efferent", "config.json"), "utf8")) as {
+      mcpServers: Record<string, unknown>
+    }
+    writeFileSync(
+      join(cwd, ".efferent", "config.json"),
+      JSON.stringify({
+        mcpServers: { ...config.mcpServers, dead: { command: "/nonexistent-mcp-binary" } },
+      }),
+    )
+    const started = Date.now()
+    const result = await Effect.runPromise(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const client = yield* McpClient
+          const tools = yield* client.listTools
+          const first = yield* client.callTool("dead", "echo", {}).pipe(Effect.either)
+          const second = yield* client.callTool("dead", "echo", {}).pipe(Effect.either)
+          return { tools, first, second }
+        }).pipe(Effect.provide(McpClientLive(cwd, "/nonexistent-home"))),
+      ),
+    )
+    expect(Date.now() - started).toBeLessThan(10_000)
+    expect(result.tools.map((t) => `${t.server}/${t.name}`)).toEqual(["canned/echo"])
+    // Both attempts report the SPAWN failure — the second did not inherit a
+    // dead promise from the first.
+    expect(result.first._tag).toBe("Left")
+    expect(JSON.stringify(result.first)).toContain("spawn failed")
+    expect(result.second._tag).toBe("Left")
+    expect(JSON.stringify(result.second)).toContain("spawn failed")
   })
 })

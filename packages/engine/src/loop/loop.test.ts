@@ -3,7 +3,7 @@ import { AiError, LanguageModel, Tool, Toolkit } from "@effect/ai"
 import { Effect, Layer, Option, Ref, Schema, Stream } from "effect"
 import { Failure } from "../domain/failure.entity.js"
 import type { LoopEvent } from "../domain/loop-event.entity.js"
-import { DEGENERATE_REPEAT_NUDGE, runLoop } from "./loop.js"
+import { DEGENERATE_REPEAT_NUDGE, foldProgress, nextPhase, runLoop } from "./loop.js"
 
 /** A scripted provider: call N returns `script(N)`'s encoded parts. */
 const scriptedModel = (script: (call: number) => ReadonlyArray<unknown>) =>
@@ -529,5 +529,57 @@ describe("runLoop streaming", () => {
       (m) => m.role === "user" && m.content.includes("could not be parsed"),
     )
     expect(corrective).toBeDefined()
+  })
+})
+
+describe("runLoop — the decisions, pure", () => {
+  test("foldProgress: an empty signature is inert; a repeat counts; nudge at 3, break at 5", () => {
+    const start = { seen: new Set<string>(), staleTurns: 0 }
+    const first = foldProgress(start, "echo:ok:x")
+    expect(first.stale).toBe(0)
+    expect(first.seen.has("echo:ok:x")).toBe(true)
+    // The fold's output feeds the next turn's input.
+    const carry = (r: ReturnType<typeof foldProgress>) => ({ seen: r.seen, staleTurns: r.stale })
+    const idle = foldProgress(carry(first), "")
+    expect(idle.stale).toBe(0)
+    expect(idle.seen).toBe(first.seen)
+    const repeats = [1, 2, 3, 4, 5].reduce(
+      (acc) => [...acc, foldProgress(carry(acc[acc.length - 1] ?? first), "echo:ok:x")],
+      [first],
+    )
+    expect(repeats.map((r) => r.stale)).toEqual([0, 1, 2, 3, 4, 5])
+    expect(repeats.map((r) => r.nudge)).toEqual([false, false, false, true, false, false])
+    expect(repeats.map((r) => r.broke)).toEqual([false, false, false, false, false, true])
+    // Fresh progress resets the count.
+    expect(foldProgress(carry(repeats[5]!), "echo:ok:y").stale).toBe(0)
+  })
+
+  test("nextPhase: the breaker outranks the model, the cap outranks 'more tools'", () => {
+    expect(nextPhase({ broke: true, wantsMore: true, turnIndex: 1, maxSteps: 10 })).toBe("degenerate-loop")
+    expect(nextPhase({ broke: false, wantsMore: false, turnIndex: 1, maxSteps: 10 })).toBe("completed")
+    expect(nextPhase({ broke: false, wantsMore: true, turnIndex: 10, maxSteps: 10 })).toBe("step-cap")
+    expect(nextPhase({ broke: false, wantsMore: true, turnIndex: 3, maxSteps: 10 })).toBe("continue")
+  })
+
+  test("a malformed streak cannot carry a run past the step cap — the corrective turns count", async () => {
+    const { events, onEvent } = collect()
+    const result = await run(
+      runLoop({
+        system: "sys",
+        messages: [user("go")],
+        toolkit: kit,
+        maxSteps: 2,
+        onEvent,
+      }),
+      () => [
+        { type: "tool-call", id: "c", name: "not_a_tool", params: {} },
+        finish("tool-calls"),
+      ],
+    )
+    // Two model calls (turn 0 malformed → corrective; turn 1 hits the cap),
+    // never a third: the cap is honoured on the recovery path too.
+    expect(result.outcome).toBe("partial")
+    expect(result.reason).toBe("step-cap")
+    expect(events.filter((e) => e.type === "turn_start")).toHaveLength(2)
   })
 })

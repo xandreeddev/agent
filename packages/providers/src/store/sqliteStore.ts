@@ -8,6 +8,7 @@ import {
   ConversationId,
   ConversationStore,
   ConversationSummary,
+  StoredMessage,
   StoreError,
 } from "@xandreed/engine"
 
@@ -88,6 +89,23 @@ const salvageRows = (
     }),
   ).pipe(Effect.map((decoded) => decoded.filter(Option.isSome).map((some) => some.value)))
 
+/** The positioned twin: an undecodable row is still skipped, but every row
+ *  that decodes keeps ITS position — the loader never has to count. */
+const salvagePositioned = (
+  rows: ReadonlyArray<{ position: number; content: string }>,
+  where: string,
+): Effect.Effect<ReadonlyArray<StoredMessage>> =>
+  Effect.forEach(rows, (row) =>
+    Either.match(decodeMessage(row.content), {
+      onLeft: (issue) =>
+        Effect.logWarning(
+          `${where}: skipping undecodable message row at ${row.position}: ${String(issue)}`,
+        ).pipe(Effect.as(Option.none<StoredMessage>())),
+      onRight: (message) =>
+        Effect.succeed(Option.some(new StoredMessage({ position: row.position, message }))),
+    }),
+  ).pipe(Effect.map((decoded) => decoded.filter(Option.isSome).map((some) => some.value)))
+
 export const SqliteConversationStoreLive = (dbPath: string) =>
   Layer.scoped(
     ConversationStore,
@@ -148,6 +166,28 @@ export const SqliteConversationStoreLive = (dbPath: string) =>
               ).position,
           ),
 
+        // ONE transaction: a turn's assistant call and its tool results land
+        // together or not at all (an interrupt between two appends used to
+        // leave a tool call the next run could not send).
+        appendAll: (id: ConversationId, messages: ReadonlyArray<AgentMessage>) =>
+          tryDb(() =>
+            db.transaction(() =>
+              messages.map(
+                (message) =>
+                  (
+                    db
+                      .query(
+                        `INSERT INTO messages (conversation_id, position, content, created_at)
+                         SELECT ?1, COALESCE(MAX(position) + 1, 0), ?2, ?3
+                         FROM messages WHERE conversation_id = ?1
+                         RETURNING position`,
+                      )
+                      .get(id, JSON.stringify(message), Date.now()) as { position: number }
+                  ).position,
+              ),
+            )(),
+          ),
+
         list: (id: ConversationId) =>
           tryDb(
             () =>
@@ -167,11 +207,11 @@ export const SqliteConversationStoreLive = (dbPath: string) =>
             })
             return db
               .query(
-                `SELECT content FROM messages
+                `SELECT position, content FROM messages
                  WHERE conversation_id = ? AND position > ? ORDER BY position ASC`,
               )
-              .all(id, after) as ReadonlyArray<{ content: string }>
-          }).pipe(Effect.flatMap((rows) => salvageRows(rows, `listActive ${id}`))),
+              .all(id, after) as ReadonlyArray<{ position: number; content: string }>
+          }).pipe(Effect.flatMap((rows) => salvagePositioned(rows, `listActive ${id}`))),
 
         checkpoint: (id: ConversationId, summary: string) =>
           tryDb(() => {

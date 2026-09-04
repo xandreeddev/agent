@@ -53,7 +53,7 @@ describe("SqliteConversationStoreLive", () => {
         yield* store.append(id, user("new-1"))
 
         const active = yield* store.listActive(id)
-        expect(active).toEqual([user("new-1")])
+        expect(active.map((row) => row.message)).toEqual([user("new-1")])
         // list still returns EVERYTHING (originals never modified).
         expect(yield* store.list(id)).toHaveLength(3)
 
@@ -105,7 +105,7 @@ describe("SqliteConversationStoreLive", () => {
         yield* store.append(id, user("p2"))
         // Mid-run fold covering rows 0..1 — row 2 stays active.
         yield* store.checkpointAt(id, "MID FOLD", 1)
-        expect(yield* store.listActive(id)).toEqual([user("p2")])
+        expect((yield* store.listActive(id)).map((row) => row.message)).toEqual([user("p2")])
         expect(Option.getOrThrow(yield* store.latestCheckpoint(id)).messagePosition).toBe(1)
         // The attempt-boundary fold (MAX position) wins as the latest.
         yield* store.checkpoint(id, "FULL FOLD")
@@ -146,7 +146,7 @@ describe("SqliteConversationStoreLive", () => {
         expect(forked.map((m) => m.content)).toEqual(["one", "two", "three"])
         // The checkpoint rode along: listActive shows only post-fold rows.
         const active = yield* store.listActive(fork)
-        expect(active.map((m) => m.content)).toEqual(["three"])
+        expect(active.map((row) => row.message.content)).toEqual(["three"])
         // Independence: appending to the fork never touches the source.
         yield* store.append(fork, { role: "user", content: "fork-only" })
         const sourceRows = yield* store.list(source)
@@ -267,6 +267,30 @@ describe("SqliteConversationStoreLive", () => {
         // The workspace listing survives a corrupt FIRST row too.
         const listed = yield* store.listByWorkspace("/ws")
         expect(listed).toHaveLength(1)
+      }),
+    )
+  })
+})
+
+describe("SqliteConversationStoreLive — one turn, one write", () => {
+  test("appendAll assigns contiguous positions in one transaction; listActive returns rows WITH positions", async () => {
+    await withStore(
+      Effect.gen(function* () {
+        const store = yield* ConversationStore
+        const id = yield* store.create("/ws")
+        yield* store.append(id, user("prompt"))
+        const positions = yield* store.appendAll(id, [
+          { role: "assistant", content: [{ type: "text", text: "calling" }] },
+          { role: "tool", content: [] },
+        ])
+        expect(positions).toEqual([1, 2])
+        const active = yield* store.listActive(id)
+        expect(active.map((row) => [row.position, row.message.role])).toEqual([
+          [0, "user"],
+          [1, "assistant"],
+          [2, "tool"],
+        ])
+        expect(yield* store.appendAll(id, [])).toEqual([])
       }),
     )
   })
