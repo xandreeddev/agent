@@ -110,8 +110,11 @@ const FORBIDDEN_CLASS = new Set([
   "ef-count-badge", "ef-unread-dot", "ef-ref-flash",
 ])
 
-const SAFE_HREF = /^(https?:\/\/|\/|#|mailto:)/i
-const SAFE_SRC = /^(https:\/\/|\/)/i
+/** A relative URL starts with ONE slash: `//evil.example/x` and `/\evil` are
+ *  protocol-relative (the browser fills in `https:`) — off-site without a
+ *  scheme, past the noopener/_blank treatment external links get. */
+const SAFE_HREF = /^(https?:\/\/|\/(?![\/\\])|#|mailto:)/i
+const SAFE_SRC = /^(https:\/\/|\/(?![\/\\]))/i
 const EXTERNAL = /^https?:\/\//i
 
 const ATTR_RE = /([a-zA-Z_@:][a-zA-Z0-9_:.@-]*)\s*(?:=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+)))?/g
@@ -121,8 +124,10 @@ const ATTR_RE = /([a-zA-Z_@:][a-zA-Z0-9_:.@-]*)\s*(?:=\s*(?:"([^"]*)"|'([^']*)'|
 const ALPINE_NAME =
   /^(x-[a-z][a-z0-9-]*(?::[a-zA-Z0-9_-]+)?(?:\.[a-zA-Z0-9-]+)*|@[a-z][a-z0-9-]*(?:\.[a-zA-Z0-9-]+)*|:[a-z][a-z0-9-]*)$/
 
-/** Directives banned even in alpine mode. */
-const ALPINE_BANNED = new Set(["x-html", "x-teleport"])
+/** Directives banned even in alpine mode. Bare `x-bind` (the OBJECT form,
+ *  `x-bind="{ href: u }"`) binds any attribute at once — it would smuggle
+ *  the URL/style binds the per-attribute check below refuses. */
+const ALPINE_BANNED = new Set(["x-html", "x-teleport", "x-bind"])
 
 /** Attributes that may never be BOUND dynamically (URL/style laundering —
  *  a bound value bypasses the static href/src/action checks above). */

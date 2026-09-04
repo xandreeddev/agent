@@ -217,6 +217,12 @@ const noSelfTrigger = (tokens: ReadonlyArray<TagToken>): ReadonlyArray<UiFinding
 const FOREIGN_API =
   /\b(fetch|XMLHttpRequest|WebSocket|EventSource|sendBeacon|importScripts|eval|Function|globalThis|window|document|location|navigator|localStorage|sessionStorage|indexedDB|cookie|Reflect|Proxy|constructor|__proto__|prototype|process|require|import)\b/
 
+/** Escapes the word blocklist misses: walking from `$el` to the window
+ *  (`ownerDocument.defaultView`, `getRootNode`) and ASSIGNING a URL-bearing
+ *  property (`$el.href = …`) — a navigation the static href check never saw. */
+const FOREIGN_REACH =
+  /\b(ownerDocument|defaultView|getRootNode|parentNode|parentElement|closest|querySelector|querySelectorAll|getElementById|getElementsBy\w+)\b|\.(href|src|srcset|action|formaction|srcdoc|style|innerHTML|outerHTML)\s*=[^=]/
+
 const ALPINE_DIRECTIVE = /^(x-|@|:)/
 
 const alpineExpr = (tokens: ReadonlyArray<TagToken>): ReadonlyArray<UiFinding> =>
@@ -232,12 +238,21 @@ const alpineExpr = (tokens: ReadonlyArray<TagToken>): ReadonlyArray<UiFinding> =
         ]
       }
       const hit = FOREIGN_API.exec(value)
-      return hit === null
+      if (hit !== null) {
+        return [
+          {
+            rule: "alpine-expr" as const,
+            detail: `${name}="${value.slice(0, 60)}" references "${hit[1]}" — Alpine expressions are page-LOCAL state only (no network, storage, navigation, or global access); anything needing the agent or persistence goes through an htmx /action/ post`,
+          },
+        ]
+      }
+      const reach = FOREIGN_REACH.exec(value)
+      return reach === null
         ? []
         : [
             {
               rule: "alpine-expr" as const,
-              detail: `${name}="${value.slice(0, 60)}" references "${hit[1]}" — Alpine expressions are page-LOCAL state only (no network, storage, navigation, or global access); anything needing the agent or persistence goes through an htmx /action/ post`,
+              detail: `${name}="${value.slice(0, 60)}" reaches past the element ("${reach[0].trim()}") — DOM walking and URL/markup assignment are navigation in disguise; bind state with x-text/x-show/:class and let the markup carry the links`,
             },
           ]
     }),

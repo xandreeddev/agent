@@ -179,3 +179,28 @@ describe("the 11 policy gates", () => {
     )
   })
 })
+
+describe("Gate B at send — the ledger's intent rows", () => {
+  test("a `posting` intent for the same target bounces a second approval; a `post_failed` one does not", () => {
+    const posting = ctx({
+      phase: "post",
+      ledger: [row({ event: "posting", targetTweetId: "111", targetAuthor: "@someone" })],
+    })
+    expect(rules(reply(), posting)).toContain("dedup")
+    const failed = ctx({
+      phase: "post",
+      ledger: [row({ event: "post_failed", targetTweetId: "111", targetAuthor: "@someone" })],
+    })
+    expect(rules(reply(), failed)).not.toContain("dedup")
+  })
+
+  test("the author cap sees `alice` and `@Alice` as one account", () => {
+    const policy: SocialPolicy = { ...DEFAULT_POLICY, perAuthorCap: 1, authorCooldownHours: 0 }
+    const c = ctx({
+      phase: "post",
+      policy,
+      ledger: [row({ event: "posted", targetTweetId: "9", targetAuthor: "Someone" })],
+    })
+    expect(rules(reply({ targetAuthor: "@someone" }), c)).toContain("author-cap")
+  })
+})

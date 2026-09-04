@@ -182,3 +182,19 @@ describe("sanitizeHtml — attack cases", () => {
     expect(sanitizeHtml(`<svg><circle r="9"/></svg>`).dropped).toContain("svg")
   })
 })
+
+describe("sanitizeHtml — the URL and Alpine holes", () => {
+  test("protocol-relative URLs are off-site without a scheme: dropped from href and src", () => {
+    expect(clean(`<a href="//evil.example/x">x</a>`)).toBe("<a>x</a>")
+    expect(clean(`<a href="/\\evil.example/x">x</a>`)).toBe("<a>x</a>")
+    expect(clean(`<img src="//evil.example/x.png">`)).toBe("<img />")
+    // A real relative path still passes.
+    expect(clean(`<a href="/posts/x">x</a>`)).toBe(`<a href="/posts/x">x</a>`)
+  })
+
+  test("the OBJECT form of x-bind is dropped in alpine mode — it would bind href/style past the per-attribute check", () => {
+    const out = render(sanitizeHtml(`<a x-bind="{ href: u, style: s }" x-data="{u:'https://evil.example'}">x</a>`, { alpine: true }).html)
+    expect(out).not.toContain("x-bind")
+    expect(out).toContain("x-data")
+  })
+})

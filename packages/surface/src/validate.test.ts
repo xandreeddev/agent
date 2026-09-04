@@ -100,3 +100,16 @@ describe("validateUi — the ui-builder's hard gates", () => {
     expect(renderUiFindings(found)).toBe(renderUiFindings([...found].reverse()))
   })
 })
+
+describe("validateUi — reaching past the element", () => {
+  test("DOM walking and URL/markup assignment in an Alpine expression are navigation in disguise", () => {
+    const flagged = (attr: string) =>
+      validateUi(`<button ${attr}>x</button>`, { alpine: true }).filter((f) => f.rule === "alpine-expr")
+    expect(flagged(`x-init="$el.href='https://evil.example'"`)).toHaveLength(1)
+    expect(flagged(`@click="$el.ownerDocument.defaultView.open('https://evil.example')"`)).toHaveLength(1)
+    expect(flagged(`x-effect="$el.parentNode.innerHTML = payload"`)).toHaveLength(1)
+    expect(flagged(`x-data="{ href: 'x' }"`)).toHaveLength(0)
+    expect(flagged(`@click="open = !open"`)).toHaveLength(0)
+    expect(flagged(`:class="{ active: count === 1 }"`)).toHaveLength(0)
+  })
+})

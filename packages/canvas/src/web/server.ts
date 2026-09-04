@@ -45,10 +45,34 @@ const chatMessage = (form: FormData): string => {
   return page.length > 0 ? `[viewing:${page}] ${prompt}` : prompt
 }
 
-const sameOrigin = (req: Request): boolean => {
-  const origin = req.headers.get("origin")
-  return origin === null || origin === new URL(req.url).origin
-}
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["127.0.0.1", "localhost", "[::1]"])
+
+/**
+ * A browser origin this LOOPBACK server trusts: http, a loopback host, and
+ * the port it is actually listening on. Never "whatever the Host header
+ * says" — DNS rebinding points an attacker's hostname at 127.0.0.1, and the
+ * old same-Host comparison let that page through. A request with NO Origin
+ * is refused too: every browser sends one on a form post and a WebSocket
+ * upgrade, and those are the only callers a Canvas has.
+ */
+const trustedOrigin = (origin: string | null, port: number | undefined): boolean =>
+  Option.match(
+    Option.flatMap(Option.fromNullable(origin), (raw) =>
+      Option.liftThrowable(() => new URL(raw))(),
+    ),
+    {
+      onNone: () => false,
+      onSome: (url) =>
+        port !== undefined &&
+        url.protocol === "http:" &&
+        LOOPBACK_HOSTS.has(url.hostname) &&
+        Number(url.port === "" ? 80 : url.port) === port,
+    },
+  )
+
+/** `port` is the one the server is LISTENING on (never the requested 0). */
+const sameOrigin = (req: Request, port: number | undefined): boolean =>
+  trustedOrigin(req.headers.get("origin"), port)
 
 export const serveCanvas = (args: {
   readonly session: CanvasSession
@@ -161,7 +185,14 @@ export const serveCanvas = (args: {
       port: args.port,
       fetch: (req, srv) => {
         const url = new URL(req.url)
-        if (url.pathname === "/ws" && srv.upgrade(req)) return undefined
+        // The socket carries every page and the CSRF token in the compiled
+        // forms — an unchecked upgrade let any site the user visits read
+        // them from loopback (cross-site WebSocket hijacking).
+        if (url.pathname === "/ws") {
+          if (!sameOrigin(req, srv.port)) return new Response("forbidden", { status: 403 })
+          if (srv.upgrade(req)) return undefined
+          return new Response("upgrade failed", { status: 400 })
+        }
         if (url.pathname === "/") return new Response(renderShell(csrfToken), { headers: { "content-type": "text/html", "content-security-policy": CSP } })
         if (url.pathname === "/design-system") return new Response(renderDesignSystemShell([...components.values()], compileContext, galleryThemes.map(({ id, label }) => ({ id, label }))), { headers: { "content-type": "text/html", "content-security-policy": CSP } })
         if (url.pathname === "/assets/theme.css") return new Response(tokenCss, { headers: { "content-type": "text/css", "cache-control": "no-store" } })
@@ -174,7 +205,7 @@ export const serveCanvas = (args: {
         const asset = ASSETS[url.pathname]
         if (asset !== undefined) return new Response(Bun.file(joinPath(ASSET_DIR, asset.path)), { headers: { "content-type": asset.type } })
         if (req.method === "POST" && (url.pathname === "/action/chat" || url.pathname === "/action/ui")) {
-          if (!sameOrigin(req)) return new Response("origin rejected", { status: 403 })
+          if (!sameOrigin(req, srv.port)) return new Response("origin rejected", { status: 403 })
           return req.formData().then((form) => {
             if (String(form.get("csrf") ?? "") !== csrfToken) return new Response("csrf rejected", { status: 403 })
             const text = url.pathname === "/action/chat" ? chatMessage(form) : uiMessage(form)
@@ -183,7 +214,7 @@ export const serveCanvas = (args: {
           })
         }
         if (req.method === "POST" && url.pathname === "/action/host") {
-          if (!sameOrigin(req)) return new Response("origin rejected", { status: 403 })
+          if (!sameOrigin(req, srv.port)) return new Response("origin rejected", { status: 403 })
           return req.formData().then((form) => {
             if (String(form.get("csrf") ?? "") !== csrfToken) return new Response("csrf rejected", { status: 403 })
             const capabilityId = String(form.get("capability") ?? "")
