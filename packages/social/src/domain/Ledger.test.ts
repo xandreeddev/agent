@@ -8,7 +8,9 @@ import {
 } from "./ledger.entity.js"
 import {
   engagedTweetIds,
+  normalizeAuthor,
   postedInWindow,
+  postedToAuthor,
 } from "./ledger.entity.functions.js"
 import {
   appendLedger,
@@ -65,5 +67,28 @@ describe("engagement ledger", () => {
     expect(postedInWindow(rows, NOW, 3_600_000)).toHaveLength(1)
     expect(postedInWindow(rows, NOW, 24 * 3_600_000)).toHaveLength(1)
     expect(postedInWindow(rows, NOW, 26 * 3_600_000)).toHaveLength(2)
+  })
+})
+
+describe("engagement ledger — intent rows and author identity", () => {
+  test("a `posting` intent counts as engaged and as posted; a `post_failed` row frees the target", () => {
+    const rows = [
+      entry({ event: "posting", targetTweetId: "1", targetAuthor: "@Alice" }),
+      entry({ event: "post_failed", targetTweetId: "2", targetAuthor: "bob" }),
+      entry({ event: "posted", targetTweetId: "3", targetAuthor: "alice" }),
+    ]
+    expect([...engagedTweetIds(rows)].sort()).toEqual(["1", "3"])
+    expect(postedInWindow(rows, NOW, 60_000).map((r) => r.targetTweetId)).toEqual(["1", "3"])
+  })
+
+  test("`@Alice`, `alice`, `ALICE` are one author — the cap cannot be dodged by the at-sign", () => {
+    const rows = [
+      entry({ event: "posted", targetTweetId: "1", targetAuthor: "@Alice" }),
+      entry({ event: "posting", targetTweetId: "2", targetAuthor: "alice" }),
+      entry({ event: "posted", targetTweetId: "3", targetAuthor: "@bob" }),
+    ]
+    expect(postedToAuthor(rows, "ALICE").map((r) => r.targetTweetId)).toEqual(["1", "2"])
+    expect(postedToAuthor(rows, "@alice")).toHaveLength(2)
+    expect(normalizeAuthor("  @Alice ")).toBe("alice")
   })
 })

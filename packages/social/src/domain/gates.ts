@@ -71,9 +71,14 @@ type Gate = (draft: SocialDraft, ctx: GateContext) => ReadonlyArray<SocialFindin
 /** 1 · Never engage the same tweet twice (the ledger remembers forever). */
 const dedup: Gate = (draft, ctx) => {
   if (draft.targetTweetId === undefined) return []
+  // At SEND, a draft competes only with what left (or is leaving) — its own
+  // `drafted` row must not bounce it; a `posting` intent from a crashed
+  // approval does, until a `post_failed` row frees the target.
   const engaged = engagedTweetIds(
     ctx.phase === "post"
-      ? ctx.ledger.filter((e) => e.event === "posted" || e.event === "queued")
+      ? ctx.ledger.filter(
+          (e) => e.event === "posted" || e.event === "posting" || e.event === "queued",
+        )
       : ctx.ledger,
   )
   return engaged.has(draft.targetTweetId)
