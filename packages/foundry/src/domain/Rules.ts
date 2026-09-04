@@ -33,11 +33,6 @@ export class LayerConfig extends Schema.Class<LayerConfig>("LayerConfig")({
   layers: Schema.NonEmptyArray(LayerSpec),
 }) {}
 
-export class EvalShapeConfig extends Schema.Class<EvalShapeConfig>("EvalShapeConfig")({
-  /** Workspace-relative path of the suite registry module. */
-  registry: Schema.NonEmptyString,
-  suiteGlob: Schema.optionalWith(Schema.NonEmptyString, { default: () => "**/*.eval.ts" }),
-}) {}
 
 /** A STANDING command check — the project's own scripts (lint, format,
  *  design-token audits) as part of the profile: exit 0 = clean. Armed by
@@ -61,7 +56,6 @@ export class GateSuiteConfig extends Schema.Class<GateSuiteConfig>("GateSuiteCon
   tsconfig: Schema.NonEmptyString,
   rules: Schema.Array(RuleConfig),
   boundaries: Schema.optionalWith(LayerConfig, { as: "Option" }),
-  evalShape: Schema.optionalWith(EvalShapeConfig, { as: "Option" }),
   checks: Schema.optionalWith(Schema.Array(CheckConfig), { default: () => [] }),
   /** Run the typecheck gate too. Set false when `tsc` already runs beside
    *  this check (e.g. the repo's `bun run typecheck`) — no double program check. */

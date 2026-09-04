@@ -9,7 +9,7 @@ import type { Severity } from "../domain/Finding.js"
 import type { RuleConfig } from "../domain/Rules.js"
 import type { Gate, Workspace } from "../ports/Gate.js"
 import { includedBy, locationOf, projectSourceFiles, toWorkspacePath } from "./astWalk.js"
-import { TsProject } from "./TsProject.js"
+import { TsProject } from "./TsProject.port.js"
 
 export interface RuleContext {
   readonly sourceFile: ts.SourceFile

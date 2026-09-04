@@ -7,7 +7,7 @@ import { Finding } from "../domain/Finding.js"
 import type { LayerConfig, LayerSpec } from "../domain/Rules.js"
 import type { Gate, Workspace } from "../ports/Gate.js"
 import { locationOf, matchesGlob, projectSourceFiles, toWorkspacePath } from "./astWalk.js"
-import { TsProject } from "./TsProject.js"
+import { TsProject } from "./TsProject.port.js"
 
 export const BOUNDARIES_GATE = GateName.make("boundaries")
 

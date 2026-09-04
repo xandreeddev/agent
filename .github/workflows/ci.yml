@@ -28,8 +28,11 @@ jobs:
 
       - run: bun install --frozen-lockfile
 
-      # tsc + foundry self-check (the dogfood) + the ratcheted repo gate suite.
+      # tsc + the zero-baseline repo gate suite — foundry's own source included.
       - run: bun run typecheck
+
+      # Foundry's own profile (its 6-layer boundaries) — the dogfood proper.
+      - run: bun packages/foundry/src/main.ts check --config packages/foundry/foundry.config.ts
 
       # Foundry's key-free E2E: the forge loop over a scripted implementor.
       - run: bun run foundry demo
